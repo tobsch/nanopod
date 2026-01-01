@@ -1,7 +1,8 @@
 substitutions:
   ma_host: "192.168.0.157"
   ma_port: "8095"
-  ma_player: "lindas_zimmer"
+  ma_token: "z4lw6YU4SocmbYnwcRBm5XTRzbBvT7BrvkZauBeC7ApGCrG0Y_aGzYYMtsr23fmY"
+  ma_player: "ma_room_kueche"
 
 esphome:
   name: linda-audiobook-controller
@@ -19,14 +20,18 @@ esphome:
       - logger.log: "Display power enabled"
       - delay: 500ms
       - script.execute: led_idle
-      - delay: 100ms
-      - script.execute: update_series_display
+      - script.execute: update_home_display
+      - wait_until:
+          wifi.connected:
+      - logger.log: "WiFi connected, fetching artists..."
+      - delay: 2000ms
+      - script.execute: fetch_artists
 
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
   framework:
-    type: arduino
+    type: esp-idf
     version: recommended
   flash_size: 16MB
 
@@ -57,7 +62,7 @@ logger:
   level: DEBUG
 
 # ============================================
-# Music Assistant API Configuration
+# Music Assistant Configuration
 # ============================================
 
 http_request:
@@ -119,10 +124,10 @@ switch:
 
 # RGB LEDs
 light:
-  - platform: neopixelbus
+  - platform: esp32_rmt_led_strip
     id: rgb_leds
-    type: GRB
-    variant: WS2812
+    rgb_order: GRB
+    chipset: WS2812
     pin: GPIO48
     num_leds: 5
     name: "Status LEDs"
@@ -136,14 +141,6 @@ light:
           update_interval: 1s
           min_brightness: 30%
           max_brightness: 100%
-      - addressable_color_wipe:
-          name: "Volume Up"
-          colors:
-            - red: 0%
-              green: 100%
-              blue: 0%
-              num_leds: 1
-          add_led_interval: 100ms
       - strobe:
           name: "Error"
           colors:
@@ -156,15 +153,17 @@ light:
             - state: false
               duration: 500ms
 
-# Global state tracking
+# ============================================
+# Global State and Data Storage
+# ============================================
 globals:
   - id: current_screen
     type: int
-    initial_value: "0"  # 0=HOME, 1=SERIES, 2=PLAYING
-  - id: selected_series
+    initial_value: "0"  # 0=HOME, 1=ALBUMS, 2=PLAYING
+  - id: selected_artist
     type: int
     initial_value: "0"
-  - id: selected_episode
+  - id: selected_album
     type: int
     initial_value: "0"
   - id: current_volume
@@ -173,6 +172,36 @@ globals:
   - id: is_playing
     type: bool
     initial_value: "false"
+  - id: artist_count
+    type: int
+    initial_value: "0"
+  - id: album_count
+    type: int
+    initial_value: "0"
+  # Artist data (max 10 artists)
+  - id: artist_names
+    type: std::vector<std::string>
+  - id: artist_ids
+    type: std::vector<std::string>
+  # Album data for current artist (max 20 albums)
+  - id: album_names
+    type: std::vector<std::string>
+  - id: album_ids
+    type: std::vector<std::string>
+  - id: album_uris
+    type: std::vector<std::string>
+  - id: album_artist_ids
+    type: std::vector<std::string>
+  # Filtered albums for current artist
+  - id: filtered_album_names
+    type: std::vector<std::string>
+  - id: filtered_album_ids
+    type: std::vector<std::string>
+  - id: filtered_album_uris
+    type: std::vector<std::string>
+  # HTTP request body storage
+  - id: request_body
+    type: std::string
 
 # Rotary Encoder
 sensor:
@@ -186,13 +215,17 @@ sensor:
       - lambda: |-
           int screen = id(current_screen);
           if (screen == 0) {
-            // HOME: next series
-            id(selected_series) = (id(selected_series) + 1) % 5;
-            ESP_LOGI("nav", "Series: %d", id(selected_series));
+            // HOME: next artist
+            if (id(artist_count) > 0) {
+              id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
+            }
+            ESP_LOGI("nav", "Artist: %d", id(selected_artist));
           } else if (screen == 1) {
-            // SERIES: next episode
-            id(selected_episode) = std::min(id(selected_episode) + 1, 9);
-            ESP_LOGI("nav", "Episode: %d", id(selected_episode));
+            // ALBUMS: next album
+            if (id(album_count) > 0) {
+              id(selected_album) = (id(selected_album) + 1) % id(album_count);
+            }
+            ESP_LOGI("nav", "Album: %d", id(selected_album));
           } else if (screen == 2) {
             // PLAYING: volume up
             id(current_volume) = std::min(id(current_volume) + 5, 100);
@@ -211,13 +244,17 @@ sensor:
       - lambda: |-
           int screen = id(current_screen);
           if (screen == 0) {
-            // HOME: previous series
-            id(selected_series) = (id(selected_series) + 4) % 5;
-            ESP_LOGI("nav", "Series: %d", id(selected_series));
+            // HOME: previous artist
+            if (id(artist_count) > 0) {
+              id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
+            }
+            ESP_LOGI("nav", "Artist: %d", id(selected_artist));
           } else if (screen == 1) {
-            // SERIES: previous episode
-            id(selected_episode) = std::max(id(selected_episode) - 1, 0);
-            ESP_LOGI("nav", "Episode: %d", id(selected_episode));
+            // ALBUMS: previous album
+            if (id(album_count) > 0) {
+              id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
+            }
+            ESP_LOGI("nav", "Album: %d", id(selected_album));
           } else if (screen == 2) {
             // PLAYING: volume down
             id(current_volume) = std::max(id(current_volume) - 5, 0);
@@ -252,38 +289,38 @@ binary_sensor:
         - lambda: |-
             int screen = id(current_screen);
             if (screen == 0) {
-              // HOME: Click opens series
+              // HOME: Click opens albums for artist
               id(current_screen) = 1;
-              id(selected_episode) = 0;
-              ESP_LOGI("nav", "HOME -> SERIES");
+              id(selected_album) = 0;
+              ESP_LOGI("nav", "HOME -> ALBUMS");
             } else if (screen == 1) {
-              // SERIES: Click plays episode
+              // ALBUMS: Click plays album
               id(current_screen) = 2;
               id(is_playing) = true;
-              ESP_LOGI("nav", "SERIES -> PLAYING");
+              ESP_LOGI("nav", "ALBUMS -> PLAYING");
             } else if (screen == 2) {
               // PLAYING: Click toggles play/pause
               id(is_playing) = !id(is_playing);
               ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
             }
-        - script.execute: update_display
-        - if:
-            condition:
-              lambda: 'return id(current_screen) == 2;'
-            then:
-              - script.execute: ma_toggle_play_pause
-              - if:
-                  condition:
-                    lambda: 'return id(is_playing);'
-                  then:
-                    - script.execute: led_playing
-                  else:
-                    - script.execute: led_paused
         - if:
             condition:
               lambda: 'return id(current_screen) == 1;'
             then:
+              - script.execute: fetch_albums
+        - script.execute: update_display
+        - if:
+            condition:
+              lambda: 'return id(current_screen) == 2 && id(is_playing);'
+            then:
+              - script.execute: ma_play_album
               - script.execute: led_playing
+        - if:
+            condition:
+              lambda: 'return id(current_screen) == 2 && !id(is_playing);'
+            then:
+              - script.execute: ma_pause
+              - script.execute: led_paused
     on_double_click:
       min_length: 50ms
       max_length: 350ms
@@ -291,13 +328,13 @@ binary_sensor:
         - lambda: |-
             int screen = id(current_screen);
             if (screen == 1) {
-              // SERIES: Double-click goes back to HOME
+              // ALBUMS: Double-click goes back to HOME
               id(current_screen) = 0;
-              ESP_LOGI("nav", "SERIES -> HOME");
+              ESP_LOGI("nav", "ALBUMS -> HOME");
             } else if (screen == 2) {
-              // PLAYING: Double-click goes back to SERIES
+              // PLAYING: Double-click goes back to ALBUMS
               id(current_screen) = 1;
-              ESP_LOGI("nav", "PLAYING -> SERIES");
+              ESP_LOGI("nav", "PLAYING -> ALBUMS");
             }
         - script.execute: update_display
     on_multi_click:
@@ -315,8 +352,133 @@ binary_sensor:
           - script.execute: update_display
           - script.execute: led_idle
 
-# Scripts for display and Music Assistant API
+# ============================================
+# Scripts
+# ============================================
 script:
+  # Fetch albums and extract unique artists (so we only show artists with albums)
+  - id: fetch_artists
+    then:
+      - logger.log: "Starting fetch_artists (from albums)..."
+      - lambda: |-
+          id(artist_names).clear();
+          id(artist_ids).clear();
+          id(album_names).clear();
+          id(album_ids).clear();
+          id(album_uris).clear();
+          id(album_artist_ids).clear();
+          ESP_LOGI("ma", "Fetching all albums to extract artists...");
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api"
+          capture_response: true
+          max_response_buffer_size: 65536
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: '{"command":"music/albums/library_items","args":{"limit":100}}'
+          on_response:
+            then:
+              - lambda: |-
+                  ESP_LOGI("ma", "Got albums response: status=%d, len=%d", response->status_code, body.length());
+                  if (response->status_code == 200 && body.length() > 2) {
+                    JsonDocument doc;
+                    DeserializationError error = deserializeJson(doc, body);
+
+                    if (error) {
+                      ESP_LOGW("ma", "Initial parse failed: %s, trying fix...", error.c_str());
+                      std::string json_str = body;
+                      size_t last_complete = json_str.rfind("},{");
+                      if (last_complete != std::string::npos) {
+                        json_str = json_str.substr(0, last_complete + 1) + "]";
+                        error = deserializeJson(doc, json_str);
+                      }
+                    }
+
+                    if (error) {
+                      ESP_LOGE("ma", "JSON parse error: %s", error.c_str());
+                    } else if (doc.is<JsonArray>()) {
+                      JsonArray arr = doc.as<JsonArray>();
+                      ESP_LOGI("ma", "Parsed %d albums", arr.size());
+
+                      // Store all albums with their artist IDs
+                      for (JsonObject album : arr) {
+                        const char* name = album["name"] | "Unknown";
+                        const char* item_id = album["item_id"] | "0";
+                        const char* uri = album["uri"] | "";
+
+                        // Extract first artist from each album
+                        JsonArray artists = album["artists"];
+                        std::string album_artist_id = "0";
+                        if (artists.size() > 0) {
+                          JsonObject artist = artists[0];
+                          const char* artist_name = artist["name"] | "Unknown";
+                          const char* artist_id = artist["item_id"] | "0";
+                          album_artist_id = std::string(artist_id);
+
+                          // Check if we already have this artist in our list
+                          bool found = false;
+                          for (const auto& existing_id : id(artist_ids)) {
+                            if (existing_id == album_artist_id) {
+                              found = true;
+                              break;
+                            }
+                          }
+                          if (!found && id(artist_names).size() < 20) {
+                            id(artist_names).push_back(std::string(artist_name));
+                            id(artist_ids).push_back(album_artist_id);
+                            ESP_LOGD("ma", "Found artist: %s (id=%s)", artist_name, artist_id);
+                          }
+                        }
+
+                        // Store album with its artist ID
+                        id(album_names).push_back(std::string(name));
+                        id(album_ids).push_back(std::string(item_id));
+                        id(album_uris).push_back(std::string(uri));
+                        id(album_artist_ids).push_back(album_artist_id);
+                      }
+                      id(artist_count) = id(artist_names).size();
+                      id(album_count) = id(album_names).size();
+                      ESP_LOGI("ma", "Total: %d unique artists, %d albums", id(artist_count), id(album_count));
+                    }
+                  } else {
+                    ESP_LOGE("ma", "HTTP error: %d", response->status_code);
+                  }
+      - logger.log: "fetch_artists script complete"
+      - script.execute: update_home_display
+
+  # Filter albums for current artist (from already-loaded data)
+  - id: fetch_albums
+    then:
+      - lambda: |-
+          // Clear filtered lists
+          id(filtered_album_names).clear();
+          id(filtered_album_ids).clear();
+          id(filtered_album_uris).clear();
+
+          // Get selected artist ID
+          std::string target_artist_id = "";
+          std::string target_artist_name = "";
+          if (id(selected_artist) < id(artist_ids).size()) {
+            target_artist_id = id(artist_ids)[id(selected_artist)];
+            target_artist_name = id(artist_names)[id(selected_artist)];
+          }
+          ESP_LOGI("ma", "Filtering albums for artist: %s (id=%s)", target_artist_name.c_str(), target_artist_id.c_str());
+
+          // Filter albums by artist ID
+          int count = 0;
+          for (size_t i = 0; i < id(album_names).size() && count < 20; i++) {
+            if (id(album_artist_ids)[i] == target_artist_id) {
+              id(filtered_album_names).push_back(id(album_names)[i]);
+              id(filtered_album_ids).push_back(id(album_ids)[i]);
+              id(filtered_album_uris).push_back(id(album_uris)[i]);
+              count++;
+            }
+          }
+          id(album_count) = count;
+          ESP_LOGI("ma", "Filtered %d albums for %s", count, target_artist_name.c_str());
+      - script.execute: update_album_display
+
+  # Update display based on current screen
   - id: update_display
     then:
       - if:
@@ -324,15 +486,13 @@ script:
             lambda: 'return id(current_screen) == 0;'
           then:
             - lvgl.page.show: page_home
-            - script.execute: update_series_display
+            - script.execute: update_home_display
       - if:
           condition:
             lambda: 'return id(current_screen) == 1;'
           then:
-            - lvgl.page.show: page_series
-            - script.execute: update_episode_list
-            - lambda: |-
-                lv_roller_set_selected(id(episode_roller)->obj, id(selected_episode), LV_ANIM_ON);
+            - lvgl.page.show: page_albums
+            - script.execute: update_album_display
       - if:
           condition:
             lambda: 'return id(current_screen) == 2;'
@@ -341,160 +501,133 @@ script:
             - lvgl.arc.update:
                 id: volume_arc
                 value: !lambda 'return id(current_volume);'
-            - script.execute: update_track_title
+            - script.execute: update_player_display
 
-  # Update series title on HOME screen
-  - id: update_series_display
+  # Update HOME screen with current artist
+  - id: update_home_display
     then:
       - lvgl.label.update:
-          id: series_title
+          id: artist_title
           text: !lambda |-
-            const char* names[] = {"Bibi Blocksberg", "Benjamin Blümchen", "Die drei ???", "TKKG", "Fünf Freunde"};
-            return names[id(selected_series) % 5];
+            if (id(artist_count) > 0 && id(selected_artist) < id(artist_names).size()) {
+              return id(artist_names)[id(selected_artist)].c_str();
+            }
+            return "Loading...";
       - lvgl.label.update:
-          id: series_subtitle
+          id: artist_subtitle
           text: !lambda |-
-            const char* counts[] = {"12 Episoden", "8 Episoden", "15 Episoden", "10 Episoden", "6 Episoden"};
-            return counts[id(selected_series) % 5];
+            static char buf[32];
+            snprintf(buf, sizeof(buf), "%d / %d", id(selected_artist) + 1, id(artist_count));
+            return buf;
 
-  # Update episode list when entering SERIES screen
-  - id: update_episode_list
+  # Update ALBUMS screen with album list
+  - id: update_album_display
     then:
       - lambda: |-
-          int series = id(selected_series) % 5;
-          const char* options = "";
-
-          if (series == 0) {
-            // Bibi Blocksberg
-            options = "Hexen gibt es doch\n"
-                      "Bibi und die Zauberlimonade\n"
-                      "Bibi und das Dino-Ei\n"
-                      "Der Bankraeuber\n"
-                      "Die Schlossgespenster\n"
-                      "Karla gibt nicht auf\n"
-                      "Der Flohmarkt\n"
-                      "Das traurige Einhorn\n"
-                      "Papis Geburtstag\n"
-                      "Bibi im Orient\n"
-                      "Der Hexenfluch\n"
-                      "Die neue Schule";
-          } else if (series == 1) {
-            // Benjamin Bluemchen
-            options = "als Wetterelefant\n"
-                      "rettet den Zoo\n"
-                      "und die Eisprinzessin\n"
-                      "als Pirat\n"
-                      "und der kleine Hund\n"
-                      "als Detektiv\n"
-                      "im Krankenhaus\n"
-                      "als Feuerwehrmann";
-          } else if (series == 2) {
-            // Die drei ???
-            options = "Der Super-Papagei\n"
-                      "Die Geisterinsel\n"
-                      "Der Karpatenhund\n"
-                      "Die schwarze Katze\n"
-                      "Der rote Pirat\n"
-                      "Tal des Schreckens\n"
-                      "Der seltsame Wecker\n"
-                      "Der unsichtbare Gegner\n"
-                      "Die bedrohte Ranch\n"
-                      "Stimmen aus dem Nichts\n"
-                      "Der lachende Schatten\n"
-                      "Der Fluch des Tigers\n"
-                      "Das Bergmonster\n"
-                      "Schlucht der Daemonen\n"
-                      "Der heimliche Hehler";
-          } else if (series == 3) {
-            // TKKG
-            options = "Die Jagd nach den Millionendieben\n"
-                      "Der blinde Hellseher\n"
-                      "Das leere Grab im Moor\n"
-                      "Das Phantom der Nacht\n"
-                      "Alarm im Zirkus Dorani\n"
-                      "Verbrechen im Rampenlicht\n"
-                      "Raetsel um die alte Villa\n"
-                      "Todesfracht im Jaguar\n"
-                      "Abenteuer im Ferienlager\n"
-                      "Ein Fall fuer TKKG";
-          } else {
-            // Fuenf Freunde
-            options = "Fuenf Freunde erforschen die Schatzinsel\n"
-                      "Fuenf Freunde auf neuen Abenteuern\n"
-                      "Fuenf Freunde auf geheimnisvollen Spuren\n"
-                      "Fuenf Freunde auf Schmugglerjagd\n"
-                      "Fuenf Freunde wittern ein Geheimnis\n"
-                      "Fuenf Freunde auf der Felseninsel";
+          std::string options = "";
+          for (int i = 0; i < id(album_count); i++) {
+            if (i > 0) options += "\n";
+            options += id(filtered_album_names)[i];
           }
+          if (options.empty()) {
+            options = "No albums found";
+          }
+          lv_roller_set_options(id(album_roller)->obj, options.c_str(), LV_ROLLER_MODE_NORMAL);
+          lv_roller_set_selected(id(album_roller)->obj, id(selected_album), LV_ANIM_ON);
 
-          lv_roller_set_options(id(episode_roller)->obj, options, LV_ROLLER_MODE_NORMAL);
-
-  # Update track title on PLAYER screen
-  - id: update_track_title
+  # Update PLAYER screen with current track
+  - id: update_player_display
     then:
       - lvgl.label.update:
           id: track_title
           text: !lambda |-
-            static char title[64];
-            snprintf(title, sizeof(title), "Episode %d", id(selected_episode) + 1);
-            return title;
+            if (id(album_count) > 0 && id(selected_album) < id(filtered_album_names).size()) {
+              return id(filtered_album_names)[id(selected_album)].c_str();
+            }
+            return "Unknown";
+      - lvgl.label.update:
+          id: play_icon
+          text: !lambda |-
+            if (id(is_playing)) {
+              return "\uF04C";
+            }
+            return "\uF04B";
 
-  # Music Assistant API: Play
-  - id: ma_play
+  # Music Assistant API: Play album
+  - id: ma_play_album
     then:
       - http_request.post:
-          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/play"
+          url: "http://${ma_host}:${ma_port}/api"
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: !lambda |-
+            std::string uri = "";
+            if (id(selected_album) < id(filtered_album_uris).size()) {
+              uri = id(filtered_album_uris)[id(selected_album)];
+            }
+            return "{\"command\":\"player_queues/play_media\",\"args\":{\"queue_id\":\"${ma_player}\",\"media\":\"" + uri + "\",\"option\":\"replace\"}}";
           on_response:
             then:
-              - logger.log:
-                  format: "MA Play response: %d"
-                  args: ['response->status_code']
+              - lambda: |-
+                  ESP_LOGI("ma", "Play album response: %d", response->status_code);
 
   # Music Assistant API: Pause
   - id: ma_pause
     then:
       - http_request.post:
-          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/pause"
+          url: "http://${ma_host}:${ma_port}/api"
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: '{"command":"player_queues/pause","args":{"queue_id":"${ma_player}"}}'
           on_response:
             then:
-              - logger.log:
-                  format: "MA Pause response: %d"
-                  args: ['response->status_code']
+              - lambda: |-
+                  ESP_LOGI("ma", "Pause response: %d", response->status_code);
+
+  # Music Assistant API: Resume/Play
+  - id: ma_resume
+    then:
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api"
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: '{"command":"player_queues/play","args":{"queue_id":"${ma_player}"}}'
+          on_response:
+            then:
+              - lambda: |-
+                  ESP_LOGI("ma", "Resume response: %d", response->status_code);
 
   # Music Assistant API: Stop
   - id: ma_stop
     then:
       - http_request.post:
-          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/stop"
+          url: "http://${ma_host}:${ma_port}/api"
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: '{"command":"player_queues/stop","args":{"queue_id":"${ma_player}"}}'
           on_response:
             then:
-              - logger.log:
-                  format: "MA Stop response: %d"
-                  args: ['response->status_code']
+              - lambda: |-
+                  ESP_LOGI("ma", "Stop response: %d", response->status_code);
 
   # Music Assistant API: Set Volume
   - id: ma_set_volume
     then:
       - http_request.post:
-          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/volume_set"
-          json:
-            volume_level: !lambda 'return std::to_string(id(current_volume));'
+          url: "http://${ma_host}:${ma_port}/api"
+          request_headers:
+            Content-Type: "application/json"
+            Authorization: "Bearer ${ma_token}"
+          body: !lambda |-
+            return "{\"command\":\"players/cmd/volume_set\",\"args\":{\"player_id\":\"${ma_player}\",\"volume_level\":" + std::to_string(id(current_volume)) + "}}";
           on_response:
             then:
-              - logger.log:
-                  format: "MA Volume response: %d"
-                  args: ['response->status_code']
-
-  # Music Assistant API: Toggle Play/Pause
-  - id: ma_toggle_play_pause
-    then:
-      - if:
-          condition:
-            lambda: 'return id(is_playing);'
-          then:
-            - script.execute: ma_play
-          else:
-            - script.execute: ma_pause
+              - lambda: |-
+                  ESP_LOGI("ma", "Volume response: %d", response->status_code);
 
   # LED Feedback: Show position (1-5 LEDs based on index)
   - id: led_show_position
@@ -508,18 +641,30 @@ script:
           blue: 20%
       - lambda: |-
           int pos = 0;
+          int count = 1;
           if (id(current_screen) == 0) {
-            pos = id(selected_series) % 5;
+            pos = id(selected_artist);
+            count = id(artist_count);
           } else if (id(current_screen) == 1) {
-            pos = id(selected_episode) % 5;
+            pos = id(selected_album);
+            count = id(album_count);
           }
+          // Map position to LED (0-4)
+          int led = (count > 0) ? (pos * 5 / count) : 0;
+          led = std::min(led, 4);
           auto call = id(rgb_leds).make_call();
           call.set_state(true);
           call.perform();
       - light.addressable_set:
           id: rgb_leds
-          range_from: !lambda 'return (id(current_screen) == 0) ? (id(selected_series) % 5) : (id(selected_episode) % 5);'
-          range_to: !lambda 'return (id(current_screen) == 0) ? (id(selected_series) % 5) : (id(selected_episode) % 5);'
+          range_from: !lambda |-
+            int pos = (id(current_screen) == 0) ? id(selected_artist) : id(selected_album);
+            int count = (id(current_screen) == 0) ? id(artist_count) : id(album_count);
+            return (count > 0) ? std::min(pos * 5 / count, 4) : 0;
+          range_to: !lambda |-
+            int pos = (id(current_screen) == 0) ? id(selected_artist) : id(selected_album);
+            int count = (id(current_screen) == 0) ? id(artist_count) : id(album_count);
+            return (count > 0) ? std::min(pos * 5 / count, 4) : 0;
           red: 0%
           green: 100%
           blue: 0%
@@ -604,7 +749,7 @@ lvgl:
   log_level: WARN
   page_wrap: true
   pages:
-    # Home Screen - Series Selection
+    # Home Screen - Artist Selection
     - id: page_home
       bg_color: 0x1a1a2e
       widgets:
@@ -618,17 +763,17 @@ lvgl:
             border_color: 0x1DB954
             widgets:
               - label:
-                  id: series_title
+                  id: artist_title
                   align: CENTER
                   y: -20
-                  text: "Bibi Blocksberg"
+                  text: "Loading..."
                   text_font: linda_font_24
                   text_color: 0xFFFFFF
               - label:
-                  id: series_subtitle
+                  id: artist_subtitle
                   align: CENTER
                   y: 20
-                  text: "12 Episodes"
+                  text: ""
                   text_font: linda_font_16
                   text_color: 0xB3B3B3
               - label:
@@ -638,8 +783,8 @@ lvgl:
                   text_font: linda_font_14
                   text_color: 0x666666
 
-    # Episode List Screen
-    - id: page_series
+    # Albums List Screen
+    - id: page_albums
       bg_color: 0x1a1a2e
       widgets:
         - obj:
@@ -654,20 +799,16 @@ lvgl:
               - label:
                   align: TOP_MID
                   y: 20
-                  text: "Episodes"
+                  text: "Albums"
                   text_font: linda_font_18
                   text_color: 0x1DB954
               - roller:
-                  id: episode_roller
+                  id: album_roller
                   align: CENTER
                   width: 180
                   height: 120
                   options:
-                    - "Episode 1"
-                    - "Episode 2"
-                    - "Episode 3"
-                    - "Episode 4"
-                    - "Episode 5"
+                    - "Loading..."
                   visible_row_count: 3
                   text_font: linda_font_16
 
@@ -699,14 +840,14 @@ lvgl:
               - label:
                   id: play_icon
                   align: CENTER
-                  text: "\uF04B"  # Play icon
+                  text: "\uF04B"
                   text_font: linda_font_32
                   text_color: 0xFFFFFF
         - label:
             id: track_title
             align: CENTER
             y: 70
-            text: "Episode 1"
+            text: "Loading..."
             text_font: linda_font_16
             text_color: 0xFFFFFF
         - bar:
@@ -715,7 +856,7 @@ lvgl:
             y: 95
             width: 160
             height: 6
-            value: 30
+            value: 0
             min_value: 0
             max_value: 100
             bg_color: 0x16213e
