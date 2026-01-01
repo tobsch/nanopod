@@ -2,7 +2,7 @@ substitutions:
   ma_host: "192.168.0.157"
   ma_port: "8095"
   ma_token: "z4lw6YU4SocmbYnwcRBm5XTRzbBvT7BrvkZauBeC7ApGCrG0Y_aGzYYMtsr23fmY"
-  ma_player: "ma_room_kueche"
+  ma_player: "ma_room_kinderzimmer_linda"
 
 esphome:
   name: linda-audiobook-controller
@@ -16,8 +16,12 @@ esphome:
       - switch.turn_on: lcd_power_switch
       - switch.turn_on: backlight_power_switch
       - delay: 100ms
-      - switch.turn_on: backlight
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
       - logger.log: "Display power enabled"
+      # Initialize activity timer
+      - lambda: 'id(last_activity_ms) = millis();'
       - delay: 500ms
       - script.execute: led_idle
       - script.execute: update_home_display
@@ -64,6 +68,24 @@ logger:
 # ============================================
 # Music Assistant Configuration
 # ============================================
+
+# Configurable player ID (editable from Home Assistant)
+text:
+  - platform: template
+    id: ma_player_id
+    name: "Media Player ID"
+    optimistic: true
+    min_length: 1
+    max_length: 64
+    mode: text
+    restore_value: false
+    initial_value: "${ma_player}"
+    icon: "mdi:speaker"
+    on_value:
+      then:
+        - logger.log:
+            format: "Media player changed to: %s"
+            args: ['x.c_str()']
 
 http_request:
   useragent: esphome/linda-controller
@@ -122,9 +144,11 @@ output:
     id: backlight_power
     pin: GPIO2
 
-  - platform: gpio
+  # PWM backlight for fade effects
+  - platform: ledc
     id: backlight_pwm
     pin: GPIO46
+    frequency: 1000Hz
 
 switch:
   - platform: output
@@ -141,15 +165,17 @@ switch:
     restore_mode: ALWAYS_ON
     internal: true
 
-  - platform: output
-    id: backlight
-    name: "Display Backlight"
-    output: backlight_pwm
-    restore_mode: ALWAYS_ON
-    internal: true
 
 # RGB LEDs
 light:
+  # Backlight with PWM for fade effects
+  - platform: monochromatic
+    id: backlight
+    name: "Display Backlight"
+    output: backlight_pwm
+    default_transition_length: 0s
+    restore_mode: ALWAYS_ON
+
   - platform: esp32_rmt_led_strip
     id: rgb_leds
     rgb_order: GRB
@@ -198,6 +224,13 @@ globals:
   - id: is_playing
     type: bool
     initial_value: "false"
+  # Sleep mode tracking
+  - id: last_activity_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: display_sleeping
+    type: bool
+    initial_value: "false"
   - id: artist_count
     type: int
     initial_value: "0"
@@ -239,6 +272,20 @@ globals:
   - id: request_body
     type: std::string
 
+# Sleep mode check interval
+interval:
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !id(display_sleeping) &&
+                     !id(is_playing) &&
+                     (millis() - id(last_activity_ms) > 60000);
+          then:
+            - logger.log: "Idle timeout - entering sleep mode"
+            - script.execute: enter_sleep_mode
+
 # Rotary Encoder
 sensor:
   - platform: rotary_encoder
@@ -248,89 +295,107 @@ sensor:
     pin_b: GPIO42
     resolution: 1
     on_clockwise:
-      - lambda: |-
-          int screen = id(current_screen);
-          if (screen == 0) {
-            // HOME: next artist
-            if (id(artist_count) > 0) {
-              id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
-              // Update cover for this artist
-              if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
-                id(current_cover_url) = id(artist_images)[id(selected_artist)];
-              }
-            }
-            ESP_LOGI("nav", "Artist: %d", id(selected_artist));
-          } else if (screen == 1) {
-            // ALBUMS: next album
-            if (id(album_count) > 0) {
-              id(selected_album) = (id(selected_album) + 1) % id(album_count);
-              // Update cover for this album
-              if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
-                id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
-              }
-            }
-            ESP_LOGI("nav", "Album: %d", id(selected_album));
-          } else if (screen == 2) {
-            // PLAYING: volume up
-            id(current_volume) = std::min(id(current_volume) + 5, 100);
-            ESP_LOGI("nav", "Volume: %d", id(current_volume));
-          }
-      - script.execute: update_display
+      # Reset activity timer
+      - lambda: 'id(last_activity_ms) = millis();'
+      # Wake from sleep if sleeping
       - if:
           condition:
-            lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+            lambda: 'return id(display_sleeping);'
           then:
-            - script.execute: update_cover_art
-      - if:
-          condition:
-            lambda: 'return id(current_screen) == 2;'
-          then:
-            - script.execute: ma_set_volume
-            - script.execute: led_show_volume
+            - script.execute: wake_from_sleep
           else:
-            - script.execute: led_show_position
+            - lambda: |-
+                int screen = id(current_screen);
+                if (screen == 0) {
+                  // HOME: next artist
+                  if (id(artist_count) > 0) {
+                    id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
+                    // Update cover for this artist
+                    if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                      id(current_cover_url) = id(artist_images)[id(selected_artist)];
+                    }
+                  }
+                  ESP_LOGI("nav", "Artist: %d", id(selected_artist));
+                } else if (screen == 1) {
+                  // ALBUMS: next album
+                  if (id(album_count) > 0) {
+                    id(selected_album) = (id(selected_album) + 1) % id(album_count);
+                    // Update cover for this album
+                    if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                      id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+                    }
+                  }
+                  ESP_LOGI("nav", "Album: %d", id(selected_album));
+                } else if (screen == 2) {
+                  // PLAYING: volume up
+                  id(current_volume) = std::min(id(current_volume) + 5, 100);
+                  ESP_LOGI("nav", "Volume: %d", id(current_volume));
+                }
+            - script.execute: update_display
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+                then:
+                  - script.execute: update_cover_art
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 2;'
+                then:
+                  - script.execute: ma_set_volume
+                  - script.execute: led_show_volume
+                else:
+                  - script.execute: led_show_position
     on_anticlockwise:
-      - lambda: |-
-          int screen = id(current_screen);
-          if (screen == 0) {
-            // HOME: previous artist
-            if (id(artist_count) > 0) {
-              id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
-              // Update cover for this artist
-              if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
-                id(current_cover_url) = id(artist_images)[id(selected_artist)];
-              }
-            }
-            ESP_LOGI("nav", "Artist: %d", id(selected_artist));
-          } else if (screen == 1) {
-            // ALBUMS: previous album
-            if (id(album_count) > 0) {
-              id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
-              // Update cover for this album
-              if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
-                id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
-              }
-            }
-            ESP_LOGI("nav", "Album: %d", id(selected_album));
-          } else if (screen == 2) {
-            // PLAYING: volume down
-            id(current_volume) = std::max(id(current_volume) - 5, 0);
-            ESP_LOGI("nav", "Volume: %d", id(current_volume));
-          }
-      - script.execute: update_display
+      # Reset activity timer
+      - lambda: 'id(last_activity_ms) = millis();'
+      # Wake from sleep if sleeping
       - if:
           condition:
-            lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+            lambda: 'return id(display_sleeping);'
           then:
-            - script.execute: update_cover_art
-      - if:
-          condition:
-            lambda: 'return id(current_screen) == 2;'
-          then:
-            - script.execute: ma_set_volume
-            - script.execute: led_show_volume
+            - script.execute: wake_from_sleep
           else:
-            - script.execute: led_show_position
+            - lambda: |-
+                int screen = id(current_screen);
+                if (screen == 0) {
+                  // HOME: previous artist
+                  if (id(artist_count) > 0) {
+                    id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
+                    // Update cover for this artist
+                    if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                      id(current_cover_url) = id(artist_images)[id(selected_artist)];
+                    }
+                  }
+                  ESP_LOGI("nav", "Artist: %d", id(selected_artist));
+                } else if (screen == 1) {
+                  // ALBUMS: previous album
+                  if (id(album_count) > 0) {
+                    id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
+                    // Update cover for this album
+                    if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                      id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+                    }
+                  }
+                  ESP_LOGI("nav", "Album: %d", id(selected_album));
+                } else if (screen == 2) {
+                  // PLAYING: volume down
+                  id(current_volume) = std::max(id(current_volume) - 5, 0);
+                  ESP_LOGI("nav", "Volume: %d", id(current_volume));
+                }
+            - script.execute: update_display
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+                then:
+                  - script.execute: update_cover_art
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 2;'
+                then:
+                  - script.execute: ma_set_volume
+                  - script.execute: led_show_volume
+                else:
+                  - script.execute: led_show_position
 
 # Encoder Button
 binary_sensor:
@@ -344,64 +409,82 @@ binary_sensor:
     filters:
       - delayed_on: 20ms
       - delayed_off: 20ms
+    on_press:
+      # Reset activity timer on any press
+      - lambda: 'id(last_activity_ms) = millis();'
+      # Wake from sleep if sleeping
+      - if:
+          condition:
+            lambda: 'return id(display_sleeping);'
+          then:
+            - script.execute: wake_from_sleep
     on_multi_click:
       # Short click (under 500ms): Navigate forward or toggle
       - timing:
           - ON for at most 500ms
           - OFF for at least 50ms
         then:
-          - lambda: |-
-              int screen = id(current_screen);
-              if (screen == 0) {
-                // HOME: Click opens albums for artist
-                id(current_screen) = 1;
-                id(selected_album) = 0;
-                ESP_LOGI("nav", "HOME -> ALBUMS");
-              } else if (screen == 1) {
-                // ALBUMS: Click plays album
-                id(current_screen) = 2;
-                id(is_playing) = true;
-                ESP_LOGI("nav", "ALBUMS -> PLAYING");
-              } else if (screen == 2) {
-                // PLAYING: Click toggles play/pause
-                id(is_playing) = !id(is_playing);
-                ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
-              }
+          # Skip if we just woke from sleep
           - if:
               condition:
-                lambda: 'return id(current_screen) == 1;'
+                lambda: 'return !id(display_sleeping);'
               then:
-                - script.execute: fetch_albums
-          - script.execute: update_display
-          - if:
-              condition:
-                lambda: 'return id(current_screen) == 2 && id(is_playing);'
-              then:
-                - script.execute: ma_play_album
-                - script.execute: led_playing
-          - if:
-              condition:
-                lambda: 'return id(current_screen) == 2 && !id(is_playing);'
-              then:
-                - script.execute: ma_pause
-                - script.execute: led_paused
+                - lambda: |-
+                    int screen = id(current_screen);
+                    if (screen == 0) {
+                      // HOME: Click opens albums for artist
+                      id(current_screen) = 1;
+                      id(selected_album) = 0;
+                      ESP_LOGI("nav", "HOME -> ALBUMS");
+                    } else if (screen == 1) {
+                      // ALBUMS: Click plays album
+                      id(current_screen) = 2;
+                      id(is_playing) = true;
+                      ESP_LOGI("nav", "ALBUMS -> PLAYING");
+                    } else if (screen == 2) {
+                      // PLAYING: Click toggles play/pause
+                      id(is_playing) = !id(is_playing);
+                      ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
+                    }
+                - if:
+                    condition:
+                      lambda: 'return id(current_screen) == 1;'
+                    then:
+                      - script.execute: fetch_albums
+                - script.execute: update_display
+                - if:
+                    condition:
+                      lambda: 'return id(current_screen) == 2 && id(is_playing);'
+                    then:
+                      - script.execute: ma_play_album
+                      - script.execute: led_playing
+                - if:
+                    condition:
+                      lambda: 'return id(current_screen) == 2 && !id(is_playing);'
+                    then:
+                      - script.execute: ma_pause
+                      - script.execute: led_paused
       # Long press (1s+): Go back one screen
       - timing:
           - ON for at least 800ms
         then:
-          - lambda: |-
-              int screen = id(current_screen);
-              if (screen == 1) {
-                // ALBUMS: Long press goes back to HOME
-                id(current_screen) = 0;
-                ESP_LOGI("nav", "ALBUMS -> HOME (long press)");
-              } else if (screen == 2) {
-                // PLAYING: Long press stops and goes back to ALBUMS
-                id(is_playing) = false;
-                id(current_screen) = 1;
-                ESP_LOGI("nav", "PLAYING -> ALBUMS (long press)");
-              }
-          - script.execute: ma_stop
+          - if:
+              condition:
+                lambda: 'return !id(display_sleeping);'
+              then:
+                - lambda: |-
+                    int screen = id(current_screen);
+                    if (screen == 1) {
+                      // ALBUMS: Long press goes back to HOME
+                      id(current_screen) = 0;
+                      ESP_LOGI("nav", "ALBUMS -> HOME (long press)");
+                    } else if (screen == 2) {
+                      // PLAYING: Long press stops and goes back to ALBUMS
+                      id(is_playing) = false;
+                      id(current_screen) = 1;
+                      ESP_LOGI("nav", "PLAYING -> ALBUMS (long press)");
+                    }
+                - script.execute: ma_stop
           - script.execute: update_display
           - script.execute: led_idle
 
@@ -409,6 +492,49 @@ binary_sensor:
 # Scripts
 # ============================================
 script:
+  # Enter sleep mode - fade out display and power down
+  - id: enter_sleep_mode
+    then:
+      - logger.log: "Entering sleep mode..."
+      - lambda: 'id(display_sleeping) = true;'
+      # Fade out backlight over 2 seconds
+      - light.turn_off:
+          id: backlight
+          transition_length: 2s
+      - delay: 2.5s
+      # Turn off display power to save energy
+      - switch.turn_off: lcd_power_switch
+      # Enable WiFi modem sleep for power savings
+      - lambda: |-
+          wifi::global_wifi_component->set_power_save_mode(wifi::WIFI_POWER_SAVE_HIGH);
+          ESP_LOGI("sleep", "WiFi modem sleep enabled");
+      - logger.log: "Display sleeping, WiFi in power save"
+
+  # Wake from sleep - restore display and reload catalog
+  - id: wake_from_sleep
+    then:
+      - logger.log: "Waking from sleep..."
+      # Disable WiFi power save for full performance
+      - lambda: |-
+          wifi::global_wifi_component->set_power_save_mode(wifi::WIFI_POWER_SAVE_NONE);
+          ESP_LOGI("sleep", "WiFi power save disabled");
+      # Turn on display power
+      - switch.turn_on: lcd_power_switch
+      - delay: 100ms
+      # Fade in backlight over 1 second
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+          transition_length: 1s
+      - lambda: |-
+          id(display_sleeping) = false;
+          id(last_activity_ms) = millis();
+      - delay: 500ms
+      # Reload catalog
+      - script.execute: fetch_artists
+      - script.execute: update_display
+      - logger.log: "Wake complete"
+
   # Fetch albums and extract unique artists (so we only show artists with albums)
   - id: fetch_artists
     then:
@@ -711,7 +837,12 @@ script:
             if (id(selected_album) < id(filtered_album_uris).size()) {
               uri = id(filtered_album_uris)[id(selected_album)];
             }
-            return "{\"command\":\"player_queues/play_media\",\"args\":{\"queue_id\":\"${ma_player}\",\"media\":\"" + uri + "\",\"option\":\"replace\"}}";
+            std::string player = id(ma_player_id).state;
+            if (player.empty() || player == "unknown" || player == "unavailable") {
+              player = "${ma_player}";
+            }
+            ESP_LOGI("ma", "Playing on player: %s", player.c_str());
+            return "{\"command\":\"player_queues/play_media\",\"args\":{\"queue_id\":\"" + player + "\",\"media\":\"" + uri + "\",\"option\":\"replace\"}}";
           on_response:
             then:
               - lambda: |-
@@ -725,7 +856,12 @@ script:
           request_headers:
             Content-Type: "application/json"
             Authorization: "Bearer ${ma_token}"
-          body: '{"command":"player_queues/pause","args":{"queue_id":"${ma_player}"}}'
+          body: !lambda |-
+            std::string player = id(ma_player_id).state;
+            if (player.empty() || player == "unknown" || player == "unavailable") {
+              player = "${ma_player}";
+            }
+            return "{\"command\":\"player_queues/pause\",\"args\":{\"queue_id\":\"" + player + "\"}}";
           on_response:
             then:
               - lambda: |-
@@ -739,7 +875,10 @@ script:
           request_headers:
             Content-Type: "application/json"
             Authorization: "Bearer ${ma_token}"
-          body: '{"command":"player_queues/play","args":{"queue_id":"${ma_player}"}}'
+          body: !lambda |-
+            std::string player = id(ma_player_id).state;
+            if (player.empty()) player = "${ma_player}";
+            return "{\"command\":\"player_queues/play\",\"args\":{\"queue_id\":\"" + player + "\"}}";
           on_response:
             then:
               - lambda: |-
@@ -753,7 +892,10 @@ script:
           request_headers:
             Content-Type: "application/json"
             Authorization: "Bearer ${ma_token}"
-          body: '{"command":"player_queues/stop","args":{"queue_id":"${ma_player}"}}'
+          body: !lambda |-
+            std::string player = id(ma_player_id).state;
+            if (player.empty()) player = "${ma_player}";
+            return "{\"command\":\"player_queues/stop\",\"args\":{\"queue_id\":\"" + player + "\"}}";
           on_response:
             then:
               - lambda: |-
@@ -768,7 +910,9 @@ script:
             Content-Type: "application/json"
             Authorization: "Bearer ${ma_token}"
           body: !lambda |-
-            return "{\"command\":\"players/cmd/volume_set\",\"args\":{\"player_id\":\"${ma_player}\",\"volume_level\":" + std::to_string(id(current_volume)) + "}}";
+            std::string player = id(ma_player_id).state;
+            if (player.empty()) player = "${ma_player}";
+            return "{\"command\":\"players/cmd/volume_set\",\"args\":{\"player_id\":\"" + player + "\",\"volume_level\":" + std::to_string(id(current_volume)) + "}}";
           on_response:
             then:
               - lambda: |-
@@ -936,9 +1080,8 @@ lvgl:
               - spinner:
                   id: home_spinner
                   align: CENTER
-                  y: -20
-                  width: 60
-                  height: 60
+                  width: 100
+                  height: 100
                   arc_length: 60
                   spin_time: 1s
                   arc_color: 0x333333
