@@ -1,0 +1,760 @@
+substitutions:
+  ma_host: "192.168.0.157"
+  ma_port: "8095"
+  ma_player: "lindas_zimmer"
+
+esphome:
+  name: linda-audiobook-controller
+  friendly_name: "Linda's Audiobook Controller"
+  platformio_options:
+    board_build.flash_mode: qio
+    board_build.psram_type: opi
+  on_boot:
+    priority: 600
+    then:
+      - switch.turn_on: lcd_power_switch
+      - switch.turn_on: backlight_power_switch
+      - delay: 100ms
+      - switch.turn_on: backlight
+      - logger.log: "Display power enabled"
+      - delay: 500ms
+      - script.execute: led_idle
+      - delay: 100ms
+      - script.execute: update_series_display
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: arduino
+    version: recommended
+  flash_size: 16MB
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+
+  ap:
+    ssid: "Linda-Controller-AP"
+    password: !secret ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: DEBUG
+
+# ============================================
+# Music Assistant API Configuration
+# ============================================
+
+http_request:
+  useragent: esphome/linda-controller
+  timeout: 10s
+  verify_ssl: false
+
+# ============================================
+# Hardware Configuration
+# ============================================
+
+# SPI Bus for Display
+spi:
+  clk_pin: GPIO10
+  mosi_pin: GPIO11
+
+# I2C Bus for Touch
+i2c:
+  - id: bus_touch
+    sda: GPIO6
+    scl: GPIO7
+    scan: false
+
+# Power rails - CRITICAL for CrowPanel!
+output:
+  - platform: gpio
+    id: lcd_power
+    pin: GPIO1
+
+  - platform: gpio
+    id: backlight_power
+    pin: GPIO2
+
+  - platform: gpio
+    id: backlight_pwm
+    pin: GPIO46
+
+switch:
+  - platform: output
+    id: lcd_power_switch
+    name: "LCD Power"
+    output: lcd_power
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: output
+    id: backlight_power_switch
+    name: "Backlight Power"
+    output: backlight_power
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: output
+    id: backlight
+    name: "Display Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+    internal: true
+
+# RGB LEDs
+light:
+  - platform: neopixelbus
+    id: rgb_leds
+    type: GRB
+    variant: WS2812
+    pin: GPIO48
+    num_leds: 5
+    name: "Status LEDs"
+    effects:
+      - addressable_rainbow:
+          name: "Rainbow"
+          speed: 10
+      - pulse:
+          name: "Playing Pulse"
+          transition_length: 1s
+          update_interval: 1s
+          min_brightness: 30%
+          max_brightness: 100%
+      - addressable_color_wipe:
+          name: "Volume Up"
+          colors:
+            - red: 0%
+              green: 100%
+              blue: 0%
+              num_leds: 1
+          add_led_interval: 100ms
+      - strobe:
+          name: "Error"
+          colors:
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 500ms
+            - state: false
+              duration: 500ms
+
+# Global state tracking
+globals:
+  - id: current_screen
+    type: int
+    initial_value: "0"  # 0=HOME, 1=SERIES, 2=PLAYING
+  - id: selected_series
+    type: int
+    initial_value: "0"
+  - id: selected_episode
+    type: int
+    initial_value: "0"
+  - id: current_volume
+    type: int
+    initial_value: "50"
+  - id: is_playing
+    type: bool
+    initial_value: "false"
+
+# Rotary Encoder
+sensor:
+  - platform: rotary_encoder
+    id: dial
+    name: "Dial Position"
+    pin_a: GPIO45
+    pin_b: GPIO42
+    resolution: 1
+    on_clockwise:
+      - lambda: |-
+          int screen = id(current_screen);
+          if (screen == 0) {
+            // HOME: next series
+            id(selected_series) = (id(selected_series) + 1) % 5;
+            ESP_LOGI("nav", "Series: %d", id(selected_series));
+          } else if (screen == 1) {
+            // SERIES: next episode
+            id(selected_episode) = std::min(id(selected_episode) + 1, 9);
+            ESP_LOGI("nav", "Episode: %d", id(selected_episode));
+          } else if (screen == 2) {
+            // PLAYING: volume up
+            id(current_volume) = std::min(id(current_volume) + 5, 100);
+            ESP_LOGI("nav", "Volume: %d", id(current_volume));
+          }
+      - script.execute: update_display
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 2;'
+          then:
+            - script.execute: ma_set_volume
+            - script.execute: led_show_volume
+          else:
+            - script.execute: led_show_position
+    on_anticlockwise:
+      - lambda: |-
+          int screen = id(current_screen);
+          if (screen == 0) {
+            // HOME: previous series
+            id(selected_series) = (id(selected_series) + 4) % 5;
+            ESP_LOGI("nav", "Series: %d", id(selected_series));
+          } else if (screen == 1) {
+            // SERIES: previous episode
+            id(selected_episode) = std::max(id(selected_episode) - 1, 0);
+            ESP_LOGI("nav", "Episode: %d", id(selected_episode));
+          } else if (screen == 2) {
+            // PLAYING: volume down
+            id(current_volume) = std::max(id(current_volume) - 5, 0);
+            ESP_LOGI("nav", "Volume: %d", id(current_volume));
+          }
+      - script.execute: update_display
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 2;'
+          then:
+            - script.execute: ma_set_volume
+            - script.execute: led_show_volume
+          else:
+            - script.execute: led_show_position
+
+# Encoder Button
+binary_sensor:
+  - platform: gpio
+    id: dial_button
+    name: "Dial Button"
+    pin:
+      number: GPIO41
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_click:
+      min_length: 0ms
+      max_length: 350ms
+      then:
+        - lambda: |-
+            int screen = id(current_screen);
+            if (screen == 0) {
+              // HOME: Click opens series
+              id(current_screen) = 1;
+              id(selected_episode) = 0;
+              ESP_LOGI("nav", "HOME -> SERIES");
+            } else if (screen == 1) {
+              // SERIES: Click plays episode
+              id(current_screen) = 2;
+              id(is_playing) = true;
+              ESP_LOGI("nav", "SERIES -> PLAYING");
+            } else if (screen == 2) {
+              // PLAYING: Click toggles play/pause
+              id(is_playing) = !id(is_playing);
+              ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
+            }
+        - script.execute: update_display
+        - if:
+            condition:
+              lambda: 'return id(current_screen) == 2;'
+            then:
+              - script.execute: ma_toggle_play_pause
+              - if:
+                  condition:
+                    lambda: 'return id(is_playing);'
+                  then:
+                    - script.execute: led_playing
+                  else:
+                    - script.execute: led_paused
+        - if:
+            condition:
+              lambda: 'return id(current_screen) == 1;'
+            then:
+              - script.execute: led_playing
+    on_double_click:
+      min_length: 50ms
+      max_length: 350ms
+      then:
+        - lambda: |-
+            int screen = id(current_screen);
+            if (screen == 1) {
+              // SERIES: Double-click goes back to HOME
+              id(current_screen) = 0;
+              ESP_LOGI("nav", "SERIES -> HOME");
+            } else if (screen == 2) {
+              // PLAYING: Double-click goes back to SERIES
+              id(current_screen) = 1;
+              ESP_LOGI("nav", "PLAYING -> SERIES");
+            }
+        - script.execute: update_display
+    on_multi_click:
+      - timing:
+          - ON for at least 2s
+        then:
+          - lambda: |-
+              if (id(current_screen) == 2) {
+                // PLAYING: Long press stops and goes HOME
+                id(is_playing) = false;
+                id(current_screen) = 0;
+                ESP_LOGI("nav", "STOP -> HOME");
+              }
+          - script.execute: ma_stop
+          - script.execute: update_display
+          - script.execute: led_idle
+
+# Scripts for display and Music Assistant API
+script:
+  - id: update_display
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 0;'
+          then:
+            - lvgl.page.show: page_home
+            - script.execute: update_series_display
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 1;'
+          then:
+            - lvgl.page.show: page_series
+            - script.execute: update_episode_list
+            - lambda: |-
+                lv_roller_set_selected(id(episode_roller)->obj, id(selected_episode), LV_ANIM_ON);
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 2;'
+          then:
+            - lvgl.page.show: page_player
+            - lvgl.arc.update:
+                id: volume_arc
+                value: !lambda 'return id(current_volume);'
+            - script.execute: update_track_title
+
+  # Update series title on HOME screen
+  - id: update_series_display
+    then:
+      - lvgl.label.update:
+          id: series_title
+          text: !lambda |-
+            const char* names[] = {"Bibi Blocksberg", "Benjamin Blümchen", "Die drei ???", "TKKG", "Fünf Freunde"};
+            return names[id(selected_series) % 5];
+      - lvgl.label.update:
+          id: series_subtitle
+          text: !lambda |-
+            const char* counts[] = {"12 Episoden", "8 Episoden", "15 Episoden", "10 Episoden", "6 Episoden"};
+            return counts[id(selected_series) % 5];
+
+  # Update episode list when entering SERIES screen
+  - id: update_episode_list
+    then:
+      - lambda: |-
+          int series = id(selected_series) % 5;
+          const char* options = "";
+
+          if (series == 0) {
+            // Bibi Blocksberg
+            options = "Hexen gibt es doch\n"
+                      "Bibi und die Zauberlimonade\n"
+                      "Bibi und das Dino-Ei\n"
+                      "Der Bankraeuber\n"
+                      "Die Schlossgespenster\n"
+                      "Karla gibt nicht auf\n"
+                      "Der Flohmarkt\n"
+                      "Das traurige Einhorn\n"
+                      "Papis Geburtstag\n"
+                      "Bibi im Orient\n"
+                      "Der Hexenfluch\n"
+                      "Die neue Schule";
+          } else if (series == 1) {
+            // Benjamin Bluemchen
+            options = "als Wetterelefant\n"
+                      "rettet den Zoo\n"
+                      "und die Eisprinzessin\n"
+                      "als Pirat\n"
+                      "und der kleine Hund\n"
+                      "als Detektiv\n"
+                      "im Krankenhaus\n"
+                      "als Feuerwehrmann";
+          } else if (series == 2) {
+            // Die drei ???
+            options = "Der Super-Papagei\n"
+                      "Die Geisterinsel\n"
+                      "Der Karpatenhund\n"
+                      "Die schwarze Katze\n"
+                      "Der rote Pirat\n"
+                      "Tal des Schreckens\n"
+                      "Der seltsame Wecker\n"
+                      "Der unsichtbare Gegner\n"
+                      "Die bedrohte Ranch\n"
+                      "Stimmen aus dem Nichts\n"
+                      "Der lachende Schatten\n"
+                      "Der Fluch des Tigers\n"
+                      "Das Bergmonster\n"
+                      "Schlucht der Daemonen\n"
+                      "Der heimliche Hehler";
+          } else if (series == 3) {
+            // TKKG
+            options = "Die Jagd nach den Millionendieben\n"
+                      "Der blinde Hellseher\n"
+                      "Das leere Grab im Moor\n"
+                      "Das Phantom der Nacht\n"
+                      "Alarm im Zirkus Dorani\n"
+                      "Verbrechen im Rampenlicht\n"
+                      "Raetsel um die alte Villa\n"
+                      "Todesfracht im Jaguar\n"
+                      "Abenteuer im Ferienlager\n"
+                      "Ein Fall fuer TKKG";
+          } else {
+            // Fuenf Freunde
+            options = "Fuenf Freunde erforschen die Schatzinsel\n"
+                      "Fuenf Freunde auf neuen Abenteuern\n"
+                      "Fuenf Freunde auf geheimnisvollen Spuren\n"
+                      "Fuenf Freunde auf Schmugglerjagd\n"
+                      "Fuenf Freunde wittern ein Geheimnis\n"
+                      "Fuenf Freunde auf der Felseninsel";
+          }
+
+          lv_roller_set_options(id(episode_roller)->obj, options, LV_ROLLER_MODE_NORMAL);
+
+  # Update track title on PLAYER screen
+  - id: update_track_title
+    then:
+      - lvgl.label.update:
+          id: track_title
+          text: !lambda |-
+            static char title[64];
+            snprintf(title, sizeof(title), "Episode %d", id(selected_episode) + 1);
+            return title;
+
+  # Music Assistant API: Play
+  - id: ma_play
+    then:
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/play"
+          on_response:
+            then:
+              - logger.log:
+                  format: "MA Play response: %d"
+                  args: ['response->status_code']
+
+  # Music Assistant API: Pause
+  - id: ma_pause
+    then:
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/pause"
+          on_response:
+            then:
+              - logger.log:
+                  format: "MA Pause response: %d"
+                  args: ['response->status_code']
+
+  # Music Assistant API: Stop
+  - id: ma_stop
+    then:
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/stop"
+          on_response:
+            then:
+              - logger.log:
+                  format: "MA Stop response: %d"
+                  args: ['response->status_code']
+
+  # Music Assistant API: Set Volume
+  - id: ma_set_volume
+    then:
+      - http_request.post:
+          url: "http://${ma_host}:${ma_port}/api/players/${ma_player}/volume_set"
+          json:
+            volume_level: !lambda 'return std::to_string(id(current_volume));'
+          on_response:
+            then:
+              - logger.log:
+                  format: "MA Volume response: %d"
+                  args: ['response->status_code']
+
+  # Music Assistant API: Toggle Play/Pause
+  - id: ma_toggle_play_pause
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_playing);'
+          then:
+            - script.execute: ma_play
+          else:
+            - script.execute: ma_pause
+
+  # LED Feedback: Show position (1-5 LEDs based on index)
+  - id: led_show_position
+    then:
+      - light.addressable_set:
+          id: rgb_leds
+          range_from: 0
+          range_to: 4
+          red: 0%
+          green: 0%
+          blue: 20%
+      - lambda: |-
+          int pos = 0;
+          if (id(current_screen) == 0) {
+            pos = id(selected_series) % 5;
+          } else if (id(current_screen) == 1) {
+            pos = id(selected_episode) % 5;
+          }
+          auto call = id(rgb_leds).make_call();
+          call.set_state(true);
+          call.perform();
+      - light.addressable_set:
+          id: rgb_leds
+          range_from: !lambda 'return (id(current_screen) == 0) ? (id(selected_series) % 5) : (id(selected_episode) % 5);'
+          range_to: !lambda 'return (id(current_screen) == 0) ? (id(selected_series) % 5) : (id(selected_episode) % 5);'
+          red: 0%
+          green: 100%
+          blue: 0%
+
+  # LED Feedback: Playing state - green pulsing
+  - id: led_playing
+    then:
+      - light.turn_on:
+          id: rgb_leds
+          brightness: 80%
+          red: 0%
+          green: 100%
+          blue: 0%
+          effect: "Playing Pulse"
+
+  # LED Feedback: Paused state - dim green
+  - id: led_paused
+    then:
+      - light.turn_on:
+          id: rgb_leds
+          brightness: 30%
+          red: 0%
+          green: 100%
+          blue: 0%
+          effect: "none"
+
+  # LED Feedback: Volume indicator (fill LEDs based on volume)
+  - id: led_show_volume
+    then:
+      - light.addressable_set:
+          id: rgb_leds
+          range_from: 0
+          range_to: 4
+          red: 0%
+          green: 0%
+          blue: 0%
+      - light.addressable_set:
+          id: rgb_leds
+          range_from: 0
+          range_to: !lambda 'return (id(current_volume) / 20);'
+          red: 0%
+          green: 100%
+          blue: 0%
+
+  # LED Feedback: Idle/boot - soft blue
+  - id: led_idle
+    then:
+      - light.turn_on:
+          id: rgb_leds
+          brightness: 30%
+          red: 0%
+          green: 0%
+          blue: 100%
+          effect: "none"
+
+# ============================================
+# Display with LVGL
+# ============================================
+
+display:
+  - platform: ili9xxx
+    model: GC9A01A
+    id: main_display
+    cs_pin: GPIO9
+    dc_pin: GPIO3
+    reset_pin: GPIO14
+    dimensions:
+      width: 240
+      height: 240
+    rotation: 0
+    invert_colors: true
+    data_rate: 40MHz
+    auto_clear_enabled: false
+
+# LVGL Configuration
+lvgl:
+  displays:
+    - main_display
+  touchscreens: []
+  color_depth: 16
+  buffer_size: 25%
+  log_level: WARN
+  page_wrap: true
+  pages:
+    # Home Screen - Series Selection
+    - id: page_home
+      bg_color: 0x1a1a2e
+      widgets:
+        - obj:
+            align: CENTER
+            width: 220
+            height: 220
+            radius: 110
+            bg_color: 0x16213e
+            border_width: 3
+            border_color: 0x1DB954
+            widgets:
+              - label:
+                  id: series_title
+                  align: CENTER
+                  y: -20
+                  text: "Bibi Blocksberg"
+                  text_font: linda_font_24
+                  text_color: 0xFFFFFF
+              - label:
+                  id: series_subtitle
+                  align: CENTER
+                  y: 20
+                  text: "12 Episodes"
+                  text_font: linda_font_16
+                  text_color: 0xB3B3B3
+              - label:
+                  align: BOTTOM_MID
+                  y: -20
+                  text: "Click to open"
+                  text_font: linda_font_14
+                  text_color: 0x666666
+
+    # Episode List Screen
+    - id: page_series
+      bg_color: 0x1a1a2e
+      widgets:
+        - obj:
+            align: CENTER
+            width: 220
+            height: 220
+            radius: 110
+            bg_color: 0x16213e
+            border_width: 2
+            border_color: 0x1DB954
+            widgets:
+              - label:
+                  align: TOP_MID
+                  y: 20
+                  text: "Episodes"
+                  text_font: linda_font_18
+                  text_color: 0x1DB954
+              - roller:
+                  id: episode_roller
+                  align: CENTER
+                  width: 180
+                  height: 120
+                  options:
+                    - "Episode 1"
+                    - "Episode 2"
+                    - "Episode 3"
+                    - "Episode 4"
+                    - "Episode 5"
+                  visible_row_count: 3
+                  text_font: linda_font_16
+
+    # Now Playing Screen
+    - id: page_player
+      bg_color: 0x1a1a2e
+      widgets:
+        - arc:
+            id: volume_arc
+            align: CENTER
+            width: 230
+            height: 230
+            arc_width: 8
+            start_angle: 135
+            end_angle: 45
+            value: 50
+            min_value: 0
+            max_value: 100
+            arc_color: 0x16213e
+            indicator:
+              arc_color: 0x1DB954
+        - obj:
+            align: CENTER
+            width: 100
+            height: 100
+            radius: 50
+            bg_color: 0x16213e
+            widgets:
+              - label:
+                  id: play_icon
+                  align: CENTER
+                  text: "\uF04B"  # Play icon
+                  text_font: linda_font_32
+                  text_color: 0xFFFFFF
+        - label:
+            id: track_title
+            align: CENTER
+            y: 70
+            text: "Episode 1"
+            text_font: linda_font_16
+            text_color: 0xFFFFFF
+        - bar:
+            id: progress_bar
+            align: CENTER
+            y: 95
+            width: 160
+            height: 6
+            value: 30
+            min_value: 0
+            max_value: 100
+            bg_color: 0x16213e
+            indicator:
+              bg_color: 0x1DB954
+
+font:
+  - file: "gfonts://Montserrat"
+    id: linda_font_14
+    size: 14
+    bpp: 4
+    glyphsets:
+      - GF_Latin_Kernel
+      - GF_Latin_Core
+  - file: "gfonts://Montserrat"
+    id: linda_font_16
+    size: 16
+    bpp: 4
+    glyphsets:
+      - GF_Latin_Kernel
+      - GF_Latin_Core
+  - file: "gfonts://Montserrat"
+    id: linda_font_18
+    size: 18
+    bpp: 4
+    glyphsets:
+      - GF_Latin_Kernel
+      - GF_Latin_Core
+  - file: "gfonts://Montserrat"
+    id: linda_font_24
+    size: 24
+    bpp: 4
+    glyphsets:
+      - GF_Latin_Kernel
+      - GF_Latin_Core
+  - file: "gfonts://Montserrat"
+    id: linda_font_32
+    size: 32
+    bpp: 4
+    glyphsets:
+      - GF_Latin_Kernel
+      - GF_Latin_Core
