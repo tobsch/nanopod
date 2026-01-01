@@ -70,6 +70,32 @@ http_request:
   timeout: 10s
   verify_ssl: false
 
+# Online image for cover art
+online_image:
+  - id: cover_art
+    url: "https://via.placeholder.com/120.jpg"  # Placeholder, updated dynamically
+    format: JPEG
+    resize: 100x100
+    type: RGB565
+    on_download_finished:
+      then:
+        - logger.log: "Cover art downloaded, updating widgets..."
+        - lvgl.image.update:
+            id: home_cover
+            src: cover_art
+        - lvgl.image.update:
+            id: album_cover
+            src: cover_art
+        - lvgl.image.update:
+            id: player_cover
+            src: cover_art
+        - logger.log: "Widgets updated"
+    on_error:
+      then:
+        - logger.log:
+            format: "Cover art download failed"
+            level: ERROR
+
 # ============================================
 # Hardware Configuration
 # ============================================
@@ -192,12 +218,22 @@ globals:
     type: std::vector<std::string>
   - id: album_artist_ids
     type: std::vector<std::string>
+  - id: album_images
+    type: std::vector<std::string>
+  # One cover image per artist (first album found)
+  - id: artist_images
+    type: std::vector<std::string>
+  # Current cover art URL for display
+  - id: current_cover_url
+    type: std::string
   # Filtered albums for current artist
   - id: filtered_album_names
     type: std::vector<std::string>
   - id: filtered_album_ids
     type: std::vector<std::string>
   - id: filtered_album_uris
+    type: std::vector<std::string>
+  - id: filtered_album_images
     type: std::vector<std::string>
   # HTTP request body storage
   - id: request_body
@@ -218,12 +254,20 @@ sensor:
             // HOME: next artist
             if (id(artist_count) > 0) {
               id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
+              // Update cover for this artist
+              if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                id(current_cover_url) = id(artist_images)[id(selected_artist)];
+              }
             }
             ESP_LOGI("nav", "Artist: %d", id(selected_artist));
           } else if (screen == 1) {
             // ALBUMS: next album
             if (id(album_count) > 0) {
               id(selected_album) = (id(selected_album) + 1) % id(album_count);
+              // Update cover for this album
+              if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+              }
             }
             ESP_LOGI("nav", "Album: %d", id(selected_album));
           } else if (screen == 2) {
@@ -232,6 +276,11 @@ sensor:
             ESP_LOGI("nav", "Volume: %d", id(current_volume));
           }
       - script.execute: update_display
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+          then:
+            - script.execute: update_cover_art
       - if:
           condition:
             lambda: 'return id(current_screen) == 2;'
@@ -247,12 +296,20 @@ sensor:
             // HOME: previous artist
             if (id(artist_count) > 0) {
               id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
+              // Update cover for this artist
+              if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                id(current_cover_url) = id(artist_images)[id(selected_artist)];
+              }
             }
             ESP_LOGI("nav", "Artist: %d", id(selected_artist));
           } else if (screen == 1) {
             // ALBUMS: previous album
             if (id(album_count) > 0) {
               id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
+              // Update cover for this album
+              if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+              }
             }
             ESP_LOGI("nav", "Album: %d", id(selected_album));
           } else if (screen == 2) {
@@ -261,6 +318,11 @@ sensor:
             ESP_LOGI("nav", "Volume: %d", id(current_volume));
           }
       - script.execute: update_display
+      - if:
+          condition:
+            lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+          then:
+            - script.execute: update_cover_art
       - if:
           condition:
             lambda: 'return id(current_screen) == 2;'
@@ -282,71 +344,62 @@ binary_sensor:
     filters:
       - delayed_on: 20ms
       - delayed_off: 20ms
-    on_click:
-      min_length: 0ms
-      max_length: 350ms
-      then:
-        - lambda: |-
-            int screen = id(current_screen);
-            if (screen == 0) {
-              // HOME: Click opens albums for artist
-              id(current_screen) = 1;
-              id(selected_album) = 0;
-              ESP_LOGI("nav", "HOME -> ALBUMS");
-            } else if (screen == 1) {
-              // ALBUMS: Click plays album
-              id(current_screen) = 2;
-              id(is_playing) = true;
-              ESP_LOGI("nav", "ALBUMS -> PLAYING");
-            } else if (screen == 2) {
-              // PLAYING: Click toggles play/pause
-              id(is_playing) = !id(is_playing);
-              ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
-            }
-        - if:
-            condition:
-              lambda: 'return id(current_screen) == 1;'
-            then:
-              - script.execute: fetch_albums
-        - script.execute: update_display
-        - if:
-            condition:
-              lambda: 'return id(current_screen) == 2 && id(is_playing);'
-            then:
-              - script.execute: ma_play_album
-              - script.execute: led_playing
-        - if:
-            condition:
-              lambda: 'return id(current_screen) == 2 && !id(is_playing);'
-            then:
-              - script.execute: ma_pause
-              - script.execute: led_paused
-    on_double_click:
-      min_length: 50ms
-      max_length: 350ms
-      then:
-        - lambda: |-
-            int screen = id(current_screen);
-            if (screen == 1) {
-              // ALBUMS: Double-click goes back to HOME
-              id(current_screen) = 0;
-              ESP_LOGI("nav", "ALBUMS -> HOME");
-            } else if (screen == 2) {
-              // PLAYING: Double-click goes back to ALBUMS
-              id(current_screen) = 1;
-              ESP_LOGI("nav", "PLAYING -> ALBUMS");
-            }
-        - script.execute: update_display
     on_multi_click:
+      # Short click (under 500ms): Navigate forward or toggle
       - timing:
-          - ON for at least 2s
+          - ON for at most 500ms
+          - OFF for at least 50ms
         then:
           - lambda: |-
-              if (id(current_screen) == 2) {
-                // PLAYING: Long press stops and goes HOME
-                id(is_playing) = false;
+              int screen = id(current_screen);
+              if (screen == 0) {
+                // HOME: Click opens albums for artist
+                id(current_screen) = 1;
+                id(selected_album) = 0;
+                ESP_LOGI("nav", "HOME -> ALBUMS");
+              } else if (screen == 1) {
+                // ALBUMS: Click plays album
+                id(current_screen) = 2;
+                id(is_playing) = true;
+                ESP_LOGI("nav", "ALBUMS -> PLAYING");
+              } else if (screen == 2) {
+                // PLAYING: Click toggles play/pause
+                id(is_playing) = !id(is_playing);
+                ESP_LOGI("nav", "Play/Pause: %s", id(is_playing) ? "playing" : "paused");
+              }
+          - if:
+              condition:
+                lambda: 'return id(current_screen) == 1;'
+              then:
+                - script.execute: fetch_albums
+          - script.execute: update_display
+          - if:
+              condition:
+                lambda: 'return id(current_screen) == 2 && id(is_playing);'
+              then:
+                - script.execute: ma_play_album
+                - script.execute: led_playing
+          - if:
+              condition:
+                lambda: 'return id(current_screen) == 2 && !id(is_playing);'
+              then:
+                - script.execute: ma_pause
+                - script.execute: led_paused
+      # Long press (1s+): Go back one screen
+      - timing:
+          - ON for at least 800ms
+        then:
+          - lambda: |-
+              int screen = id(current_screen);
+              if (screen == 1) {
+                // ALBUMS: Long press goes back to HOME
                 id(current_screen) = 0;
-                ESP_LOGI("nav", "STOP -> HOME");
+                ESP_LOGI("nav", "ALBUMS -> HOME (long press)");
+              } else if (screen == 2) {
+                // PLAYING: Long press stops and goes back to ALBUMS
+                id(is_playing) = false;
+                id(current_screen) = 1;
+                ESP_LOGI("nav", "PLAYING -> ALBUMS (long press)");
               }
           - script.execute: ma_stop
           - script.execute: update_display
@@ -367,6 +420,7 @@ script:
           id(album_ids).clear();
           id(album_uris).clear();
           id(album_artist_ids).clear();
+          id(album_images).clear();
           ESP_LOGI("ma", "Fetching all albums to extract artists...");
       - http_request.post:
           url: "http://${ma_host}:${ma_port}/api"
@@ -430,20 +484,74 @@ script:
                           }
                         }
 
-                        // Store album with its artist ID
+                        // Store album with its artist ID and image
                         id(album_names).push_back(std::string(name));
                         id(album_ids).push_back(std::string(item_id));
                         id(album_uris).push_back(std::string(uri));
                         id(album_artist_ids).push_back(album_artist_id);
+
+                        // Extract cover art URL (try multiple possible paths)
+                        std::string image_url = "";
+                        if (album.containsKey("image")) {
+                          JsonObject img = album["image"];
+                          const char* path = img["path"] | "";
+                          if (strlen(path) > 0) {
+                            image_url = std::string(path);
+                          }
+                        }
+                        if (image_url.empty() && album.containsKey("metadata")) {
+                          JsonObject meta = album["metadata"];
+                          if (meta.containsKey("images")) {
+                            JsonArray images = meta["images"];
+                            if (images.size() > 0) {
+                              JsonObject first_img = images[0];
+                              const char* path = first_img["path"] | "";
+                              image_url = std::string(path);
+                            }
+                          }
+                        }
+                        // Convert Spotify URLs to use smaller 300x300 thumbnails
+                        // Replace "ab67616d0000b273" (640x640) with "ab67616d00004851" (300x300)
+                        size_t pos = image_url.find("ab67616d0000b273");
+                        if (pos != std::string::npos) {
+                          image_url.replace(pos, 16, "ab67616d00004851");
+                        }
+                        id(album_images).push_back(image_url);
+                        if (!image_url.empty()) {
+                          ESP_LOGD("ma", "Album image: %s", image_url.c_str());
+                        }
                       }
                       id(artist_count) = id(artist_names).size();
                       id(album_count) = id(album_names).size();
+
+                      // Build artist_images: first album cover for each artist
+                      id(artist_images).clear();
+                      for (int a = 0; a < id(artist_ids).size(); a++) {
+                        std::string artist_id = id(artist_ids)[a];
+                        std::string first_image = "";
+                        // Find first album with this artist_id that has an image
+                        for (int b = 0; b < id(album_artist_ids).size(); b++) {
+                          if (id(album_artist_ids)[b] == artist_id && !id(album_images)[b].empty()) {
+                            first_image = id(album_images)[b];
+                            break;
+                          }
+                        }
+                        id(artist_images).push_back(first_image);
+                      }
+
                       ESP_LOGI("ma", "Total: %d unique artists, %d albums", id(artist_count), id(album_count));
                     }
                   } else {
                     ESP_LOGE("ma", "HTTP error: %d", response->status_code);
                   }
       - logger.log: "fetch_artists script complete"
+      # Set cover for first artist
+      - lambda: |-
+          if (!id(artist_images).empty() && !id(artist_images)[0].empty()) {
+            id(current_cover_url) = id(artist_images)[0];
+            ESP_LOGI("ma", "Initial cover: %s", id(current_cover_url).c_str());
+          }
+      - script.execute: update_cover_art
       - script.execute: update_home_display
 
   # Filter albums for current artist (from already-loaded data)
@@ -454,6 +562,7 @@ script:
           id(filtered_album_names).clear();
           id(filtered_album_ids).clear();
           id(filtered_album_uris).clear();
+          id(filtered_album_images).clear();
 
           // Get selected artist ID
           std::string target_artist_id = "";
@@ -471,12 +580,32 @@ script:
               id(filtered_album_names).push_back(id(album_names)[i]);
               id(filtered_album_ids).push_back(id(album_ids)[i]);
               id(filtered_album_uris).push_back(id(album_uris)[i]);
+              id(filtered_album_images).push_back(id(album_images)[i]);
               count++;
             }
           }
           id(album_count) = count;
           ESP_LOGI("ma", "Filtered %d albums for %s", count, target_artist_name.c_str());
+
+          // Set cover URL to first album's image for this artist
+          if (count > 0 && !id(filtered_album_images)[0].empty()) {
+            id(current_cover_url) = id(filtered_album_images)[0];
+            ESP_LOGI("ma", "Cover URL: %s", id(current_cover_url).c_str());
+          }
       - script.execute: update_album_display
+      - script.execute: update_cover_art
+
+  # Update cover art image
+  - id: update_cover_art
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(current_cover_url).empty();'
+          then:
+            - online_image.set_url:
+                id: cover_art
+                url: !lambda 'return id(current_cover_url);'
+            - component.update: cover_art
 
   # Update display based on current screen
   - id: update_display
@@ -506,34 +635,50 @@ script:
   # Update HOME screen with current artist
   - id: update_home_display
     then:
-      - lvgl.label.update:
-          id: artist_title
-          text: !lambda |-
-            if (id(artist_count) > 0 && id(selected_artist) < id(artist_names).size()) {
-              return id(artist_names)[id(selected_artist)].c_str();
-            }
-            return "Loading...";
-      - lvgl.label.update:
-          id: artist_subtitle
-          text: !lambda |-
-            static char buf[32];
-            snprintf(buf, sizeof(buf), "%d / %d", id(selected_artist) + 1, id(artist_count));
-            return buf;
+      - if:
+          condition:
+            lambda: 'return id(artist_count) > 0;'
+          then:
+            # Hide spinner, show content
+            - lvgl.widget.hide: home_spinner
+            - lvgl.widget.show: home_cover
+            - lvgl.widget.show: artist_title
+            - lvgl.widget.show: artist_subtitle
+            - lvgl.label.update:
+                id: artist_title
+                text: !lambda 'return id(artist_names)[id(selected_artist)].c_str();'
+            - lvgl.label.update:
+                id: artist_subtitle
+                text: !lambda |-
+                  static char buf[32];
+                  snprintf(buf, sizeof(buf), "%d / %d", id(selected_artist) + 1, id(artist_count));
+                  return buf;
+          else:
+            # Show spinner while loading
+            - lvgl.widget.show: home_spinner
+            - lvgl.widget.hide: home_cover
+            - lvgl.widget.hide: artist_title
+            - lvgl.widget.hide: artist_subtitle
 
-  # Update ALBUMS screen with album list
+  # Update ALBUMS screen with current album
   - id: update_album_display
     then:
-      - lambda: |-
-          std::string options = "";
-          for (int i = 0; i < id(album_count); i++) {
-            if (i > 0) options += "\n";
-            options += id(filtered_album_names)[i];
-          }
-          if (options.empty()) {
-            options = "No albums found";
-          }
-          lv_roller_set_options(id(album_roller)->obj, options.c_str(), LV_ROLLER_MODE_NORMAL);
-          lv_roller_set_selected(id(album_roller)->obj, id(selected_album), LV_ANIM_ON);
+      - lvgl.label.update:
+          id: album_title
+          text: !lambda |-
+            if (id(album_count) > 0 && id(selected_album) < id(filtered_album_names).size()) {
+              return id(filtered_album_names)[id(selected_album)].c_str();
+            }
+            return "No albums";
+      - lvgl.label.update:
+          id: album_subtitle
+          text: !lambda |-
+            static char buf[32];
+            snprintf(buf, sizeof(buf), "%d / %d", id(selected_album) + 1, id(album_count));
+            return buf;
+      - lvgl.image.update:
+          id: album_cover
+          src: cover_art
 
   # Update PLAYER screen with current track
   - id: update_player_display
@@ -549,9 +694,9 @@ script:
           id: play_icon
           text: !lambda |-
             if (id(is_playing)) {
-              return "\uF04C";
+              return "| |";  // Pause symbol
             }
-            return "\uF04B";
+            return ">";  // Play symbol
 
   # Music Assistant API: Play album
   - id: ma_play_album
@@ -631,6 +776,7 @@ script:
 
   # LED Feedback: Show position (1-5 LEDs based on index)
   - id: led_show_position
+    mode: restart
     then:
       - light.addressable_set:
           id: rgb_leds
@@ -668,9 +814,14 @@ script:
           red: 0%
           green: 100%
           blue: 0%
+      - delay: 1s
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
 
-  # LED Feedback: Playing state - green pulsing
+  # LED Feedback: Playing state - brief green flash
   - id: led_playing
+    mode: restart
     then:
       - light.turn_on:
           id: rgb_leds
@@ -678,21 +829,31 @@ script:
           red: 0%
           green: 100%
           blue: 0%
-          effect: "Playing Pulse"
+          effect: "none"
+      - delay: 1s
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
 
-  # LED Feedback: Paused state - dim green
+  # LED Feedback: Paused state - brief yellow flash
   - id: led_paused
+    mode: restart
     then:
       - light.turn_on:
           id: rgb_leds
-          brightness: 30%
-          red: 0%
-          green: 100%
+          brightness: 50%
+          red: 100%
+          green: 50%
           blue: 0%
           effect: "none"
+      - delay: 1s
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
 
   # LED Feedback: Volume indicator (fill LEDs based on volume)
   - id: led_show_volume
+    mode: restart
     then:
       - light.addressable_set:
           id: rgb_leds
@@ -708,9 +869,14 @@ script:
           red: 0%
           green: 100%
           blue: 0%
+      - delay: 1s
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
 
-  # LED Feedback: Idle/boot - soft blue
+  # LED Feedback: Idle/boot - brief blue flash then off
   - id: led_idle
+    mode: restart
     then:
       - light.turn_on:
           id: rgb_leds
@@ -719,6 +885,10 @@ script:
           green: 0%
           blue: 100%
           effect: "none"
+      - delay: 1s
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
 
 # ============================================
 # Display with LVGL
@@ -762,26 +932,48 @@ lvgl:
             border_width: 3
             border_color: 0x1DB954
             widgets:
+              # Loading spinner (shown initially, hidden when loaded)
+              - spinner:
+                  id: home_spinner
+                  align: CENTER
+                  y: -20
+                  width: 60
+                  height: 60
+                  arc_length: 60
+                  spin_time: 1s
+                  arc_color: 0x333333
+                  indicator:
+                    arc_color: 0x1DB954
+              # Cover art image (smaller to avoid text overlap)
+              - image:
+                  id: home_cover
+                  align: TOP_MID
+                  y: 15
+                  width: 70
+                  height: 70
+                  src: cover_art
+                  bg_color: 0x16213e
+                  hidden: true
               - label:
                   id: artist_title
                   align: CENTER
-                  y: -20
-                  text: "Loading..."
-                  text_font: linda_font_24
+                  y: 40
+                  width: 180
+                  height: 44
+                  text: ""
+                  text_font: linda_font_18
                   text_color: 0xFFFFFF
+                  long_mode: WRAP
+                  text_align: CENTER
+                  hidden: true
               - label:
                   id: artist_subtitle
                   align: CENTER
-                  y: 20
+                  y: 85
                   text: ""
-                  text_font: linda_font_16
-                  text_color: 0xB3B3B3
-              - label:
-                  align: BOTTOM_MID
-                  y: -20
-                  text: "Click to open"
                   text_font: linda_font_14
-                  text_color: 0x666666
+                  text_color: 0xB3B3B3
+                  hidden: true
 
     # Albums List Screen
     - id: page_albums
@@ -796,21 +988,33 @@ lvgl:
             border_width: 2
             border_color: 0x1DB954
             widgets:
-              - label:
+              # Cover art image
+              - image:
+                  id: album_cover
                   align: TOP_MID
-                  y: 20
-                  text: "Albums"
-                  text_font: linda_font_18
-                  text_color: 0x1DB954
-              - roller:
-                  id: album_roller
+                  y: 15
+                  width: 70
+                  height: 70
+                  src: cover_art
+                  bg_color: 0x16213e
+              - label:
+                  id: album_title
                   align: CENTER
+                  y: 30
                   width: 180
-                  height: 120
-                  options:
-                    - "Loading..."
-                  visible_row_count: 3
+                  height: 40
+                  text: ""
                   text_font: linda_font_16
+                  text_color: 0xFFFFFF
+                  long_mode: WRAP
+                  text_align: CENTER
+              - label:
+                  id: album_subtitle
+                  align: CENTER
+                  y: 75
+                  text: ""
+                  text_font: linda_font_14
+                  text_color: 0xB3B3B3
 
     # Now Playing Screen
     - id: page_player
@@ -830,26 +1034,42 @@ lvgl:
             arc_color: 0x16213e
             indicator:
               arc_color: 0x1DB954
+        # Cover art in center
+        - image:
+            id: player_cover
+            align: CENTER
+            y: -30
+            width: 70
+            height: 70
+            src: cover_art
+            bg_color: 0x16213e
+        # Play/pause overlay
         - obj:
             align: CENTER
-            width: 100
-            height: 100
-            radius: 50
-            bg_color: 0x16213e
+            y: -30
+            width: 40
+            height: 40
+            radius: 20
+            bg_color: 0x000000
+            bg_opa: 60%
             widgets:
               - label:
                   id: play_icon
                   align: CENTER
-                  text: "\uF04B"
-                  text_font: linda_font_32
+                  text: ">"
+                  text_font: linda_font_18
                   text_color: 0xFFFFFF
         - label:
             id: track_title
             align: CENTER
-            y: 70
-            text: "Loading..."
+            y: 40
+            width: 180
+            height: 44
+            text: ""
             text_font: linda_font_16
             text_color: 0xFFFFFF
+            long_mode: WRAP
+            text_align: CENTER
         - bar:
             id: progress_bar
             align: CENTER
