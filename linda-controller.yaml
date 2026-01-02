@@ -479,6 +479,8 @@ binary_sensor:
               then:
                 - lambda: |-
                     int screen = id(current_screen);
+                    // Track previous screen for transition detection
+                    id(screen_before_gesture) = screen;
                     if (screen == 0) {
                       // HOME: Click opens albums for artist
                       id(current_screen) = 1;
@@ -502,13 +504,22 @@ binary_sensor:
                 - script.execute: update_display
                 - if:
                     condition:
-                      lambda: 'return id(current_screen) == 2 && id(is_playing);'
+                      # Entering player from albums - start new playback
+                      lambda: 'return id(current_screen) == 2 && id(screen_before_gesture) == 1;'
                     then:
                       - script.execute: ma_play_album
                       - script.execute: led_playing
                 - if:
                     condition:
-                      lambda: 'return id(current_screen) == 2 && !id(is_playing);'
+                      # Toggling play on player screen
+                      lambda: 'return id(current_screen) == 2 && id(screen_before_gesture) == 2 && id(is_playing);'
+                    then:
+                      - script.execute: ma_resume
+                      - script.execute: led_playing
+                - if:
+                    condition:
+                      # Toggling pause on player screen
+                      lambda: 'return id(current_screen) == 2 && id(screen_before_gesture) == 2 && !id(is_playing);'
                     then:
                       - script.execute: ma_pause
                       - script.execute: led_paused
@@ -981,8 +992,8 @@ script:
             lambda: 'return id(current_screen) == 2;'
           then:
             - lvgl.page.show: page_player
-            - lvgl.arc.update:
-                id: volume_arc
+            - lvgl.bar.update:
+                id: volume_bar
                 value: !lambda 'return id(current_volume);'
             - script.execute: update_player_display
 
@@ -1007,12 +1018,21 @@ script:
                   static char buf[32];
                   snprintf(buf, sizeof(buf), "%d / %d", id(selected_artist) + 1, id(artist_count));
                   return buf;
+            # Update arc to show position
+            - lvgl.arc.update:
+                id: home_arc
+                value: !lambda |-
+                  if (id(artist_count) <= 1) return 100;
+                  return ((id(selected_artist) + 1) * 100) / id(artist_count);
           else:
             # Show spinner while loading
             - lvgl.widget.show: home_spinner
             - lvgl.widget.hide: home_cover
             - lvgl.widget.hide: artist_title
             - lvgl.widget.hide: artist_subtitle
+            - lvgl.arc.update:
+                id: home_arc
+                value: 0
 
   # Update ALBUMS screen with current album
   - id: update_album_display
@@ -1033,6 +1053,12 @@ script:
       - lvgl.image.update:
           id: album_cover
           src: cover_art
+      # Update arc to show position
+      - lvgl.arc.update:
+          id: album_arc
+          value: !lambda |-
+            if (id(album_count) <= 1) return 100;
+            return ((id(selected_album) + 1) * 100) / id(album_count);
 
   # Update PLAYER screen with current track
   - id: update_player_display
@@ -1227,6 +1253,12 @@ script:
   - id: led_show_volume
     mode: restart
     then:
+      # Update volume bar on screen and show
+      - lvgl.bar.update:
+          id: volume_bar
+          value: !lambda 'return id(current_volume);'
+      - lvgl.widget.show: volume_container
+      # LED feedback
       - light.addressable_set:
           id: rgb_leds
           range_from: 0
@@ -1241,7 +1273,9 @@ script:
           red: 0%
           green: 100%
           blue: 0%
-      - delay: 1s
+      - delay: 2s
+      # Hide volume indicator
+      - lvgl.widget.hide: volume_container
       - light.turn_off:
           id: rgb_leds
           transition_length: 500ms
@@ -1290,168 +1324,310 @@ lvgl:
   log_level: WARN
   page_wrap: true
   pages:
-    # Home Screen - Artist Selection
+    # ================================================
+    # Home Screen - Artist Selection (SquareLine style)
+    # ================================================
     - id: page_home
-      bg_color: 0x1a1a2e
+      bg_color: 0x464B55
       widgets:
-        - obj:
-            align: CENTER
-            width: 220
-            height: 220
-            radius: 110
-            bg_color: 0x16213e
-            border_width: 3
-            border_color: 0x1DB954
-            widgets:
-              # Loading spinner (shown initially, hidden when loaded)
-              - spinner:
-                  id: home_spinner
-                  align: CENTER
-                  width: 100
-                  height: 100
-                  arc_length: 60
-                  spin_time: 1s
-                  arc_color: 0x333333
-                  indicator:
-                    arc_color: 0x1DB954
-              # Cover art image (smaller to avoid text overlap)
-              - image:
-                  id: home_cover
-                  align: TOP_MID
-                  y: 15
-                  width: 70
-                  height: 70
-                  src: cover_art
-                  bg_color: 0x16213e
-                  hidden: true
-              - label:
-                  id: artist_title
-                  align: CENTER
-                  y: 40
-                  width: 180
-                  height: 44
-                  text: ""
-                  text_font: linda_font_18
-                  text_color: 0xFFFFFF
-                  long_mode: WRAP
-                  text_align: CENTER
-                  hidden: true
-              - label:
-                  id: artist_subtitle
-                  align: CENTER
-                  y: 85
-                  text: ""
-                  text_font: linda_font_14
-                  text_color: 0xB3B3B3
-                  hidden: true
-
-    # Albums List Screen
-    - id: page_albums
-      bg_color: 0x1a1a2e
-      widgets:
-        - obj:
-            align: CENTER
-            width: 220
-            height: 220
-            radius: 110
-            bg_color: 0x16213e
-            border_width: 2
-            border_color: 0x1DB954
-            widgets:
-              # Cover art image
-              - image:
-                  id: album_cover
-                  align: TOP_MID
-                  y: 15
-                  width: 70
-                  height: 70
-                  src: cover_art
-                  bg_color: 0x16213e
-              - label:
-                  id: album_title
-                  align: CENTER
-                  y: 30
-                  width: 180
-                  height: 40
-                  text: ""
-                  text_font: linda_font_16
-                  text_color: 0xFFFFFF
-                  long_mode: WRAP
-                  text_align: CENTER
-              - label:
-                  id: album_subtitle
-                  align: CENTER
-                  y: 75
-                  text: ""
-                  text_font: linda_font_14
-                  text_color: 0xB3B3B3
-
-    # Now Playing Screen
-    - id: page_player
-      bg_color: 0x1a1a2e
-      widgets:
+        # Outer arc ring (navigation indicator)
         - arc:
-            id: volume_arc
+            id: home_arc
             align: CENTER
-            width: 230
-            height: 230
-            arc_width: 8
-            start_angle: 135
-            end_angle: 45
-            value: 50
-            min_value: 0
-            max_value: 100
-            arc_color: 0x16213e
-            indicator:
-              arc_color: 0x1DB954
-        # Cover art in center
-        - image:
-            id: player_cover
-            align: CENTER
-            y: -30
-            width: 70
-            height: 70
-            src: cover_art
-            bg_color: 0x16213e
-        # Play/pause overlay
-        - obj:
-            align: CENTER
-            y: -30
-            width: 40
-            height: 40
-            radius: 20
-            bg_color: 0x000000
-            bg_opa: 60%
-            widgets:
-              - label:
-                  id: play_icon
-                  align: CENTER
-                  text: ">"
-                  text_font: linda_font_18
-                  text_color: 0xFFFFFF
-        - label:
-            id: track_title
-            align: CENTER
-            y: 40
-            width: 180
-            height: 44
-            text: ""
-            text_font: linda_font_16
-            text_color: 0xFFFFFF
-            long_mode: WRAP
-            text_align: CENTER
-        - bar:
-            id: progress_bar
-            align: CENTER
-            y: 95
-            width: 160
-            height: 6
+            width: 240
+            height: 240
+            arc_width: 12
+            start_angle: 0
+            end_angle: 360
+            mode: NORMAL
             value: 0
             min_value: 0
             max_value: 100
-            bg_color: 0x16213e
+            adjustable: false
+            arc_color: 0x0F1215
             indicator:
-              bg_color: 0x1DB954
+              arc_color: 0x36B9F6
+              arc_width: 12
+            knob:
+              bg_opa: 0%
+        # Outer decorative ring
+        - obj:
+            align: CENTER
+            width: 200
+            height: 200
+            radius: 100
+            bg_color: 0x646464
+            border_color: 0x2D323C
+            border_width: 2
+            shadow_color: 0x050A0F
+            shadow_width: 40
+            shadow_ofs_y: 15
+            scrollbar_mode: "OFF"
+            widgets:
+              # Inner content circle
+              - obj:
+                  align: CENTER
+                  width: 180
+                  height: 180
+                  radius: 90
+                  bg_color: 0x0C191E
+                  border_color: 0x5A646E
+                  border_width: 1
+                  scrollbar_mode: "OFF"
+                  widgets:
+                    # Loading spinner
+                    - spinner:
+                        id: home_spinner
+                        align: CENTER
+                        width: 80
+                        height: 80
+                        arc_length: 60
+                        spin_time: 1s
+                        arc_color: 0x333333
+                        indicator:
+                          arc_color: 0x36B9F6
+                    # Cover art
+                    - image:
+                        id: home_cover
+                        align: TOP_MID
+                        y: 12
+                        width: 70
+                        height: 70
+                        src: cover_art
+                        bg_color: 0x0C191E
+                        hidden: true
+                    # Artist name
+                    - label:
+                        id: artist_title
+                        align: CENTER
+                        y: 30
+                        width: 160
+                        height: 40
+                        text: ""
+                        text_font: linda_font_18
+                        text_color: 0xFFFFFF
+                        long_mode: WRAP
+                        text_align: CENTER
+                        hidden: true
+                    # Position indicator (e.g., "2 / 5")
+                    - label:
+                        id: artist_subtitle
+                        align: BOTTOM_MID
+                        y: -5
+                        text: ""
+                        text_font: linda_font_14
+                        text_color: 0x808080
+                        hidden: true
+
+    # ================================================
+    # Albums Screen (SquareLine style)
+    # ================================================
+    - id: page_albums
+      bg_color: 0x464B55
+      widgets:
+        # Outer arc ring
+        - arc:
+            id: album_arc
+            align: CENTER
+            width: 240
+            height: 240
+            arc_width: 12
+            start_angle: 0
+            end_angle: 360
+            mode: NORMAL
+            value: 0
+            min_value: 0
+            max_value: 100
+            adjustable: false
+            arc_color: 0x0F1215
+            indicator:
+              arc_color: 0x1DB954
+              arc_width: 12
+            knob:
+              bg_opa: 0%
+        # Outer decorative ring
+        - obj:
+            align: CENTER
+            width: 200
+            height: 200
+            radius: 100
+            bg_color: 0x646464
+            border_color: 0x2D323C
+            border_width: 2
+            shadow_color: 0x050A0F
+            shadow_width: 40
+            shadow_ofs_y: 15
+            scrollbar_mode: "OFF"
+            widgets:
+              # Inner content circle
+              - obj:
+                  align: CENTER
+                  width: 180
+                  height: 180
+                  radius: 90
+                  bg_color: 0x0C191E
+                  border_color: 0x5A646E
+                  border_width: 1
+                  scrollbar_mode: "OFF"
+                  widgets:
+                    # Cover art
+                    - image:
+                        id: album_cover
+                        align: TOP_MID
+                        y: 12
+                        width: 70
+                        height: 70
+                        src: cover_art
+                        bg_color: 0x0C191E
+                    # Album name
+                    - label:
+                        id: album_title
+                        align: CENTER
+                        y: 30
+                        width: 160
+                        height: 40
+                        text: ""
+                        text_font: linda_font_16
+                        text_color: 0xFFFFFF
+                        long_mode: WRAP
+                        text_align: CENTER
+                    # Position indicator
+                    - label:
+                        id: album_subtitle
+                        align: BOTTOM_MID
+                        y: -5
+                        text: ""
+                        text_font: linda_font_14
+                        text_color: 0x808080
+
+    # ================================================
+    # Now Playing Screen (SquareLine style)
+    # ================================================
+    - id: page_player
+      bg_color: 0x464B55
+      widgets:
+        # Progress arc (outer ring) - transparent main arc
+        - arc:
+            id: progress_arc
+            align: CENTER
+            width: 240
+            height: 240
+            arc_width: 15
+            start_angle: 135
+            end_angle: 45
+            value: 0
+            min_value: 0
+            max_value: 100
+            adjustable: false
+            bg_opa: 0%
+            arc_opa: 0%
+            indicator:
+              arc_color: 0x1DB954
+              arc_width: 15
+              arc_opa: 100%
+            knob:
+              bg_opa: 0%
+        # Outer decorative ring
+        - obj:
+            align: CENTER
+            width: 200
+            height: 200
+            radius: 100
+            bg_color: 0x646464
+            border_color: 0x2D323C
+            border_width: 2
+            shadow_color: 0x050A0F
+            shadow_width: 40
+            shadow_ofs_y: 15
+            scrollbar_mode: "OFF"
+            widgets:
+              # Inner content circle
+              - obj:
+                  align: CENTER
+                  width: 180
+                  height: 180
+                  radius: 90
+                  bg_color: 0x0C191E
+                  border_color: 0x5A646E
+                  border_width: 1
+                  scrollbar_mode: "OFF"
+                  widgets:
+                    # Cover art
+                    - image:
+                        id: player_cover
+                        align: TOP_MID
+                        y: 10
+                        width: 70
+                        height: 70
+                        src: cover_art
+                        bg_color: 0x0C191E
+                    # Play/pause overlay on cover
+                    - obj:
+                        align: TOP_MID
+                        y: 25
+                        width: 40
+                        height: 40
+                        radius: 20
+                        bg_color: 0x000000
+                        bg_opa: 50%
+                        border_width: 0
+                        scrollbar_mode: "OFF"
+                        widgets:
+                          - label:
+                              id: play_icon
+                              align: CENTER
+                              text: ">"
+                              text_font: linda_font_24
+                              text_color: 0xFFFFFF
+                    # Track/Album title
+                    - label:
+                        id: track_title
+                        align: CENTER
+                        y: 35
+                        width: 160
+                        height: 40
+                        text: ""
+                        text_font: linda_font_16
+                        text_color: 0xFFFFFF
+                        long_mode: WRAP
+                        text_align: CENTER
+                    # Volume indicator container (hidden by default, shown on volume change)
+                    - obj:
+                        id: volume_container
+                        align: CENTER
+                        y: 75
+                        width: 130
+                        height: 24
+                        bg_color: 0x0C191E
+                        bg_opa: 90%
+                        radius: 12
+                        border_width: 0
+                        scrollbar_mode: "OFF"
+                        hidden: true
+                        widgets:
+                          # Speaker icon
+                          - label:
+                              id: volume_icon
+                              align: LEFT_MID
+                              x: 8
+                              text: "Vol"
+                              text_font: linda_font_14
+                              text_color: 0x808080
+                          # Volume bar
+                          - bar:
+                              id: volume_bar
+                              align: RIGHT_MID
+                              x: -8
+                              width: 80
+                              height: 8
+                              value: 50
+                              min_value: 0
+                              max_value: 100
+                              radius: 4
+                              bg_color: 0x1E232D
+                              indicator:
+                                bg_color: 0x36B9F6
+                                radius: 4
 
 font:
   - file: "gfonts://Montserrat"
