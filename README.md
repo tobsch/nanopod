@@ -14,6 +14,8 @@ There are tons of commercial options for kids' audio players, but they all come 
 
 **The entire project was built in conversation with [Claude](https://claude.ai).** I started with the regular Claude app to research the hardware and generate a detailed briefing document (included in this repo as `briefing.md`). Then I fed that briefing into [Claude Code](https://claude.ai/claude-code) which implemented everything - from hardware config to the final UI. Pure ESPHome YAML, no C++ needed.
 
+For the UI design, I used [SquareLine Studio](https://squareline.io/) to visually design the circular interface with nested rings and shadows (project files in `squareline/`). Then I simply asked Claude to convert the exported C code to ESPHome LVGL YAML - it translated all the widget properties, colors, and layout perfectly.
+
 ## Overview
 
 NanoPod is a simple, child-friendly audiobook controller that connects to [Music Assistant](https://music-assistant.io/). Turn the wheel to browse, click to play - just like an iPod. No phone needed, no complicated apps.
