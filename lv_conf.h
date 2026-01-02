@@ -1,5 +1,5 @@
 /**
- * LVGL Configuration for Linda's Audiobook Controller
+ * LVGL Configuration for NanoPod
  * Based on LVGL 8.3.x
  */
 

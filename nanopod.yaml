@@ -5,8 +5,8 @@ substitutions:
   ma_player: "ma_room_kinderzimmer_linda"
 
 esphome:
-  name: linda-audiobook-controller
-  friendly_name: "Linda's Audiobook Controller"
+  name: nanopod
+  friendly_name: "NanoPod"
   platformio_options:
     board_build.flash_mode: qio
     board_build.psram_type: opi
@@ -49,7 +49,7 @@ wifi:
   fast_connect: true
 
   ap:
-    ssid: "Linda-Controller-AP"
+    ssid: "NanoPod-AP"
     password: !secret ap_password
 
 captive_portal:
@@ -88,7 +88,7 @@ text:
             args: ['x.c_str()']
 
 http_request:
-  useragent: esphome/linda-controller
+  useragent: esphome/nanopod
   timeout: 10s
   verify_ssl: false
 
@@ -1404,7 +1404,7 @@ lvgl:
                         width: 160
                         height: 40
                         text: ""
-                        text_font: linda_font_18
+                        text_font: nanopod_font_18
                         text_color: 0xFFFFFF
                         long_mode: WRAP
                         text_align: CENTER
@@ -1415,7 +1415,7 @@ lvgl:
                         align: BOTTOM_MID
                         y: -5
                         text: ""
-                        text_font: linda_font_14
+                        text_font: nanopod_font_14
                         text_color: 0x808080
                         hidden: true
 
@@ -1487,7 +1487,7 @@ lvgl:
                         width: 160
                         height: 40
                         text: ""
-                        text_font: linda_font_16
+                        text_font: nanopod_font_16
                         text_color: 0xFFFFFF
                         long_mode: WRAP
                         text_align: CENTER
@@ -1497,7 +1497,7 @@ lvgl:
                         align: BOTTOM_MID
                         y: -5
                         text: ""
-                        text_font: linda_font_14
+                        text_font: nanopod_font_14
                         text_color: 0x808080
 
     # ================================================
@@ -1577,7 +1577,7 @@ lvgl:
                               id: play_icon
                               align: CENTER
                               text: ">"
-                              text_font: linda_font_24
+                              text_font: nanopod_font_24
                               text_color: 0xFFFFFF
                     # Track/Album title
                     - label:
@@ -1587,7 +1587,7 @@ lvgl:
                         width: 160
                         height: 40
                         text: ""
-                        text_font: linda_font_16
+                        text_font: nanopod_font_16
                         text_color: 0xFFFFFF
                         long_mode: WRAP
                         text_align: CENTER
@@ -1611,7 +1611,7 @@ lvgl:
                               align: LEFT_MID
                               x: 8
                               text: "Vol"
-                              text_font: linda_font_14
+                              text_font: nanopod_font_14
                               text_color: 0x808080
                           # Volume bar
                           - bar:
@@ -1631,35 +1631,35 @@ lvgl:
 
 font:
   - file: "gfonts://Montserrat"
-    id: linda_font_14
+    id: nanopod_font_14
     size: 14
     bpp: 4
     glyphsets:
       - GF_Latin_Kernel
       - GF_Latin_Core
   - file: "gfonts://Montserrat"
-    id: linda_font_16
+    id: nanopod_font_16
     size: 16
     bpp: 4
     glyphsets:
       - GF_Latin_Kernel
       - GF_Latin_Core
   - file: "gfonts://Montserrat"
-    id: linda_font_18
+    id: nanopod_font_18
     size: 18
     bpp: 4
     glyphsets:
       - GF_Latin_Kernel
       - GF_Latin_Core
   - file: "gfonts://Montserrat"
-    id: linda_font_24
+    id: nanopod_font_24
     size: 24
     bpp: 4
     glyphsets:
       - GF_Latin_Kernel
       - GF_Latin_Core
   - file: "gfonts://Montserrat"
-    id: linda_font_32
+    id: nanopod_font_32
     size: 32
     bpp: 4
     glyphsets:

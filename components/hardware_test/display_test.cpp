@@ -134,12 +134,12 @@ void DisplayTest::create_hello_world_ui() {
     lv_label_set_text(hello_label, "Hello");
     lv_obj_align(hello_label, LV_ALIGN_CENTER, 0, -30);
 
-    // Create "Linda!" label (larger, accent color)
-    lv_obj_t* linda_label = lv_label_create(circle);
-    lv_obj_set_style_text_font(linda_label, &lv_font_montserrat_32, 0);
-    lv_obj_set_style_text_color(linda_label, lv_color_hex(0x1DB954), 0);
-    lv_label_set_text(linda_label, "Linda!");
-    lv_obj_align(linda_label, LV_ALIGN_CENTER, 0, 10);
+    // Create "NanoPod" label (larger, accent color)
+    lv_obj_t* name_label = lv_label_create(circle);
+    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(name_label, lv_color_hex(0x1DB954), 0);
+    lv_label_set_text(name_label, "NanoPod");
+    lv_obj_align(name_label, LV_ALIGN_CENTER, 0, 10);
 
     // Create instruction label at bottom
     lv_obj_t* instruction_label = lv_label_create(circle);

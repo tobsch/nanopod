@@ -1,7 +1,7 @@
-# Linda's Audiobook Controller - Development Notes
+# NanoPod - Development Notes
 
 ## Project Overview
-An iPod-style audiobook controller for children using the CrowPanel 1.28" HMI ESP32 Rotary Display with ESPHome and LVGL.
+NanoPod is an iPod-style Music Assistant controller (initially designed for children) using the CrowPanel 1.28" HMI ESP32 Rotary Display with ESPHome and LVGL.
 
 ## Hardware: CrowPanel 1.28" ESP32-S3
 - **Display**: GC9A01A 240x240 round LCD
@@ -55,7 +55,7 @@ font:
 # GOOD - unique names, uses custom font with extended glyphs
 font:
   - file: "gfonts://Montserrat"
-    id: linda_font_24
+    id: nanopod_font_24
     size: 24
     bpp: 4
     glyphsets:
@@ -150,7 +150,7 @@ To calculate swipe direction, compare start coordinates with end position from `
 
 ## File Structure
 ```
-├── linda-controller.yaml   # Main application
+├── nanopod.yaml            # Main application
 ├── hardware-test.yaml      # Hardware verification config
 ├── secrets.yaml            # WiFi, API keys, MA config
 └── claude.md               # This file

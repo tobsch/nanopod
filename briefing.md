@@ -1,14 +1,14 @@
-# Linda's Audiobook Controller
+# NanoPod
 
 ## Project Overview
 
-An iPod-inspired audiobook controller for my daughter Linda. She should be able to play her Spotify audiobooks on her room speaker – without a phone, without complicated apps.
+An iPod-inspired audiobook controller for children. Simple audiobook playback on a room speaker – without a phone, without complicated apps.
 
 ### Goals
 - Simple, child-friendly operation
 - Turn + Click like an iPod
 - Dynamic playlists from Music Assistant / Spotify
-- Playback on Linda's room speaker
+- Playback on room speaker
 
 ### Technology Decision
 - **Framework:** ESPHome (YAML + C++ Custom Components)
@@ -111,9 +111,9 @@ An iPod-inspired audiobook controller for my daughter Linda. She should be able 
 ### Project File Structure
 
 ```
-linda-audiobook-controller/
+nanopod/
 │
-├── linda-controller.yaml           # Main ESPHome config
+├── nanopod.yaml                    # Main ESPHome config
 ├── secrets.yaml                    # WiFi, API keys
 │
 ├── components/
@@ -149,12 +149,12 @@ linda-audiobook-controller/
 
 ## ESPHome Configuration
 
-### Main YAML: linda-controller.yaml
+### Main YAML: nanopod.yaml
 
 ```yaml
 esphome:
-  name: linda-audiobook-controller
-  friendly_name: "Linda's Audiobook Controller"
+  name: nanopod
+  friendly_name: "NanoPod"
   platformio_options:
     board_build.flash_mode: qio
     board_build.psram_type: opi
@@ -185,7 +185,7 @@ wifi:
   fast_connect: true
   
   ap:
-    ssid: "Linda-Controller-AP"
+    ssid: "NanoPod-AP"
     password: !secret ap_password
 
 captive_portal:
