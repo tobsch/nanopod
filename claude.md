@@ -40,7 +40,15 @@ on_boot:
 
 ## Key Learnings
 
-### 1. LVGL Font Naming Collision
+### 1. No C++ Required
+ESPHome's native LVGL component is powerful enough for complex UIs. The entire project is implemented in pure YAML with lambdas - no custom C++ components needed. This includes:
+- Display initialization via `ili9xxx` platform
+- All UI widgets via `lvgl` component
+- Touch input via `cst816` platform
+- HTTP API calls via `http_request` component
+- Dynamic images via `online_image` component
+
+### 2. LVGL Font Naming Collision (IMPORTANT)
 **Problem**: Umlauts and special characters not displaying.
 
 **Root Cause**: Using font IDs like `montserrat_24` causes ESPHome's LVGL component to use LVGL's built-in `lv_font_montserrat_24` instead of the custom font. Built-in LVGL fonts only include ASCII (0x20-0x7F).
@@ -63,7 +71,7 @@ font:
       - GF_Latin_Core  # Includes umlauts: äöüÄÖÜß
 ```
 
-### 2. ESPHome Display Platform
+### 3. ESPHome Display Platform
 **Problem**: LovyanGFX has compatibility issues with ESP-IDF 5.x.
 
 **Solution**: Use ESPHome's native `ili9xxx` platform with `GC9A01A` model:
@@ -78,7 +86,7 @@ display:
     data_rate: 40MHz
 ```
 
-### 3. LVGL Roller Updates
+### 4. LVGL Roller Updates
 **Problem**: `lvgl.roller.update` doesn't support changing options dynamically.
 
 **Solution**: Use direct LVGL C API calls in lambdas:
@@ -88,7 +96,7 @@ display:
     lv_roller_set_selected(id(episode_roller)->obj, 0, LV_ANIM_ON);
 ```
 
-### 4. LVGL Label Updates
+### 5. LVGL Label Updates
 Use the `lvgl.label.update` action for dynamic text:
 ```yaml
 - lvgl.label.update:
@@ -96,7 +104,7 @@ Use the `lvgl.label.update` action for dynamic text:
     text: !lambda 'return "Dynamic text";'
 ```
 
-### 5. LVGL Arc/Bar Indicator Styling
+### 6. LVGL Arc/Bar Indicator Styling
 Nested structure required for indicator colors:
 ```yaml
 # BAD
@@ -108,7 +116,7 @@ indicator:
   bg_color: 0x1DB954   # for bar widgets
 ```
 
-### 6. LVGL Roller Options Format
+### 7. LVGL Roller Options Format
 Use YAML list format, not newline-separated strings:
 ```yaml
 # BAD
@@ -121,7 +129,7 @@ options:
   - "Option 3"
 ```
 
-### 7. HTTP Request Headers
+### 8. HTTP Request Headers
 In ESPHome's `http_request` component, use `json:` for POST body:
 ```yaml
 - http_request.post:
@@ -130,7 +138,7 @@ In ESPHome's `http_request` component, use `json:` for POST body:
       key: !lambda 'return some_value;'
 ```
 
-### 8. CST816S Touchscreen with ESPHome
+### 9. CST816S Touchscreen with ESPHome
 The CST816 platform supports gesture detection via coordinate tracking:
 ```yaml
 touchscreen:
