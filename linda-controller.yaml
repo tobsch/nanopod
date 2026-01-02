@@ -134,6 +134,31 @@ i2c:
     scl: GPIO7
     scan: false
 
+# CST816S Touchscreen
+touchscreen:
+  - platform: cst816
+    id: touch
+    i2c_id: bus_touch
+    interrupt_pin: GPIO5
+    reset_pin: GPIO13
+    on_touch:
+      - lambda: |-
+          id(touch_start_x) = touch.x;
+          id(touch_start_y) = touch.y;
+          id(touch_end_x) = touch.x;
+          id(touch_end_y) = touch.y;
+          id(touch_start_ms) = millis();
+          ESP_LOGD("touch", "Touch start: %d, %d", touch.x, touch.y);
+    on_update:
+      - lambda: |-
+          // Update end position as finger moves
+          for (auto &tp : touches) {
+            id(touch_end_x) = tp.x;
+            id(touch_end_y) = tp.y;
+          }
+    on_release:
+      - script.execute: handle_touch_gesture
+
 # Power rails - CRITICAL for CrowPanel!
 output:
   - platform: gpio
@@ -271,6 +296,29 @@ globals:
   # HTTP request body storage
   - id: request_body
     type: std::string
+  # Touch gesture tracking
+  - id: touch_start_x
+    type: int
+    initial_value: "0"
+  - id: touch_start_y
+    type: int
+    initial_value: "0"
+  - id: touch_end_x
+    type: int
+    initial_value: "0"
+  - id: touch_end_y
+    type: int
+    initial_value: "0"
+  - id: touch_start_ms
+    type: uint32_t
+    initial_value: "0"
+  # Gesture result: 0=none, 1=select, 2=next, 3=prev, 4=back, 5=volume_change
+  - id: gesture_type
+    type: int
+    initial_value: "0"
+  - id: screen_before_gesture
+    type: int
+    initial_value: "0"
 
 # Sleep mode check interval
 interval:
@@ -534,6 +582,186 @@ script:
       - script.execute: fetch_artists
       - script.execute: update_display
       - logger.log: "Wake complete"
+
+  # Handle touch gesture - detect swipe direction and execute action
+  - id: handle_touch_gesture
+    then:
+      - lambda: 'id(last_activity_ms) = millis();'
+      - if:
+          condition:
+            lambda: 'return id(display_sleeping);'
+          then:
+            - script.execute: wake_from_sleep
+          else:
+            - lambda: |-
+                // Use stored end position from on_update
+                int end_x = id(touch_end_x);
+                int end_y = id(touch_end_y);
+
+                int dx = end_x - id(touch_start_x);
+                int dy = end_y - id(touch_start_y);
+                uint32_t duration = millis() - id(touch_start_ms);
+
+                // Thresholds
+                const int SWIPE_THRESHOLD = 30;  // pixels minimum for swipe
+                const int TAP_MAX_MOVE = 20;     // max movement for tap
+                const uint32_t TAP_MAX_TIME = 300; // max ms for tap
+
+                bool is_tap = (abs(dx) < TAP_MAX_MOVE && abs(dy) < TAP_MAX_MOVE && duration < TAP_MAX_TIME);
+                bool is_horizontal = abs(dx) > abs(dy);
+                bool is_swipe = (is_horizontal ? abs(dx) : abs(dy)) > SWIPE_THRESHOLD;
+
+                int screen = id(current_screen);
+                id(screen_before_gesture) = screen;
+                id(gesture_type) = 0;  // Reset
+
+                ESP_LOGI("touch", "Gesture: dx=%d dy=%d dur=%dms tap=%d swipe=%d", dx, dy, duration, is_tap, is_swipe);
+
+                if (is_tap) {
+                  // Tap = forward action (select / play-pause)
+                  ESP_LOGI("touch", "TAP detected");
+                  id(gesture_type) = 1;  // SELECT
+                  if (screen == 0) {
+                    id(current_screen) = 1;
+                    id(selected_album) = 0;
+                  } else if (screen == 1) {
+                    id(current_screen) = 2;
+                    id(is_playing) = true;
+                  } else if (screen == 2) {
+                    id(is_playing) = !id(is_playing);
+                  }
+                } else if (is_swipe) {
+                  if (is_horizontal) {
+                    if (dx > 0) {
+                      // SWIPE RIGHT = next
+                      ESP_LOGI("touch", "SWIPE RIGHT");
+                      id(gesture_type) = 2;  // NEXT
+                      if (screen == 0 && id(artist_count) > 0) {
+                        id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
+                        if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                          id(current_cover_url) = id(artist_images)[id(selected_artist)];
+                        }
+                      } else if (screen == 1 && id(album_count) > 0) {
+                        id(selected_album) = (id(selected_album) + 1) % id(album_count);
+                        if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                          id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+                        }
+                      } else if (screen == 2) {
+                        id(gesture_type) = 5;  // VOLUME_CHANGE
+                        id(current_volume) = std::min(id(current_volume) + 5, 100);
+                      }
+                    } else {
+                      // SWIPE LEFT = previous
+                      ESP_LOGI("touch", "SWIPE LEFT");
+                      id(gesture_type) = 3;  // PREV
+                      if (screen == 0 && id(artist_count) > 0) {
+                        id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
+                        if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
+                          id(current_cover_url) = id(artist_images)[id(selected_artist)];
+                        }
+                      } else if (screen == 1 && id(album_count) > 0) {
+                        id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
+                        if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
+                          id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
+                        }
+                      } else if (screen == 2) {
+                        id(gesture_type) = 5;  // VOLUME_CHANGE
+                        id(current_volume) = std::max(id(current_volume) - 5, 0);
+                      }
+                    }
+                  } else {
+                    // Vertical swipe
+                    if (dy < 0) {
+                      // SWIPE UP = back
+                      ESP_LOGI("touch", "SWIPE UP (back)");
+                      id(gesture_type) = 4;  // BACK
+                      if (screen == 1) {
+                        id(current_screen) = 0;
+                      } else if (screen == 2) {
+                        id(is_playing) = false;
+                        id(current_screen) = 1;
+                      }
+                    } else {
+                      // SWIPE DOWN = select (same as tap)
+                      ESP_LOGI("touch", "SWIPE DOWN (select)");
+                      id(gesture_type) = 1;  // SELECT
+                      if (screen == 0) {
+                        id(current_screen) = 1;
+                        id(selected_album) = 0;
+                      } else if (screen == 1) {
+                        id(current_screen) = 2;
+                        id(is_playing) = true;
+                      } else if (screen == 2) {
+                        id(is_playing) = !id(is_playing);
+                      }
+                    }
+                  }
+                }
+            # Execute post-gesture actions
+            - script.execute: touch_post_action
+
+  # Execute actions after touch gesture
+  # gesture_type: 0=none, 1=select, 2=next, 3=prev, 4=back, 5=volume_change
+  - id: touch_post_action
+    then:
+      # Skip if no gesture detected
+      - if:
+          condition:
+            lambda: 'return id(gesture_type) == 0;'
+          then:
+            - logger.log: "No gesture detected, skipping"
+          else:
+            # Fetch albums only when entering screen 1 from screen 0
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 1 && id(screen_before_gesture) == 0;'
+                then:
+                  - script.execute: fetch_albums
+            # Always update display
+            - script.execute: update_display
+            # Update cover art on HOME/ALBUMS screens
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
+                then:
+                  - script.execute: update_cover_art
+                  - script.execute: led_show_position
+            # Handle PLAYER screen actions
+            - if:
+                condition:
+                  # Just entered PLAYING from ALBUMS (select gesture)
+                  lambda: 'return id(current_screen) == 2 && id(screen_before_gesture) == 1 && id(gesture_type) == 1;'
+                then:
+                  - script.execute: ma_play_album
+                  - script.execute: led_playing
+            - if:
+                condition:
+                  # Toggle play/pause on PLAYING screen
+                  lambda: 'return id(current_screen) == 2 && id(screen_before_gesture) == 2 && id(gesture_type) == 1;'
+                then:
+                  - if:
+                      condition:
+                        lambda: 'return id(is_playing);'
+                      then:
+                        - script.execute: ma_resume
+                        - script.execute: led_playing
+                      else:
+                        - script.execute: ma_pause
+                        - script.execute: led_paused
+            - if:
+                condition:
+                  # Volume change on PLAYING screen
+                  lambda: 'return id(gesture_type) == 5;'
+                then:
+                  - script.execute: ma_set_volume
+                  - script.execute: led_show_volume
+            - if:
+                condition:
+                  # Back from PLAYING (stop playback)
+                  lambda: 'return id(gesture_type) == 4 && id(screen_before_gesture) == 2;'
+                then:
+                  - script.execute: ma_stop
+                  - script.execute: led_idle
 
   # Fetch albums and extract unique artists (so we only show artists with albums)
   - id: fetch_artists
@@ -1057,7 +1285,6 @@ display:
 lvgl:
   displays:
     - main_display
-  touchscreens: []
   color_depth: 16
   buffer_size: 25%
   log_level: WARN

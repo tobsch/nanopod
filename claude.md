@@ -8,7 +8,7 @@ An iPod-style audiobook controller for children using the CrowPanel 1.28" HMI ES
 - **MCU**: ESP32-S3 with 16MB Flash, 8MB PSRAM
 - **Input**: Rotary encoder with button (GPIO45/42 for rotation, GPIO41 for button)
 - **LEDs**: 5x WS2812 RGB LEDs on GPIO48
-- **Touch**: CST816S on I2C (GPIO6/7) - not used in this project
+- **Touch**: CST816S on I2C (GPIO6/7, INT=GPIO5, RST=GPIO13)
 
 ### Critical: Power Rail Configuration
 The CrowPanel requires explicit power rail activation before the display works:
@@ -130,6 +130,24 @@ In ESPHome's `http_request` component, use `json:` for POST body:
       key: !lambda 'return some_value;'
 ```
 
+### 8. CST816S Touchscreen with ESPHome
+The CST816 platform supports gesture detection via coordinate tracking:
+```yaml
+touchscreen:
+  - platform: cst816
+    id: touch
+    i2c_id: bus_touch
+    interrupt_pin: GPIO5
+    reset_pin: GPIO13
+    on_touch:
+      - lambda: |-
+          id(touch_start_x) = touch.x;
+          id(touch_start_y) = touch.y;
+    on_release:
+      - script.execute: handle_touch_gesture
+```
+To calculate swipe direction, compare start coordinates with end position from `id(touch)->get_touch_points()[0]`.
+
 ## File Structure
 ```
 ├── linda-controller.yaml   # Main application
@@ -146,22 +164,33 @@ API endpoints (adjust for your MA version):
 - Volume: `POST /api/players/{player_id}/volume_set` with JSON body
 
 ## Navigation State Machine
-```
-HOME (series carousel)
-  │
-  ├── Turn: cycle through series
-  └── Click: → SERIES
 
-SERIES (episode list)
+Both rotary encoder and touch gestures are supported:
+
+```
+HOME (artist carousel)
   │
-  ├── Turn: scroll episodes
-  ├── Click: → PLAYER (start playback)
+  ├── Turn / Swipe L/R: cycle through artists
+  ├── Click / Tap / Swipe Down: → ALBUMS
+  └── Swipe Up: (no action)
+
+ALBUMS (album list)
+  │
+  ├── Turn / Swipe L/R: scroll albums
+  ├── Click / Tap / Swipe Down: → PLAYER (start playback)
+  ├── Long press / Swipe Up: → HOME
   └── Double-click: → HOME
 
 PLAYER (now playing)
   │
-  ├── Turn: adjust volume
-  ├── Click: toggle play/pause
-  ├── Double-click: → SERIES
-  └── Long press (2s): stop → HOME
+  ├── Turn / Swipe L/R: adjust volume
+  ├── Click / Tap: toggle play/pause
+  ├── Long press / Swipe Up: stop → ALBUMS
+  └── Swipe Down: toggle play/pause
 ```
+
+### Touch Gesture Detection
+Gestures are detected by tracking touch start/end coordinates:
+- **Swipe threshold**: 30px minimum movement
+- **Tap detection**: <20px movement, <300ms duration
+- Horizontal vs vertical determined by larger delta
