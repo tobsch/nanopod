@@ -12,7 +12,7 @@ While my wife was reading, I was playing with Claude on my phone (forgot my book
 
 There are tons of commercial options for kids' audio players, but they all come with subscriptions and limited content libraries. Since we're already on Spotify with all her audiobooks, I had the idea to create this little device. No soldering required - just flash and go.
 
-**The entire project was built in conversation with [Claude](https://claude.ai)** - from hardware research to the final YAML config. Pure ESPHome, no C++ needed.
+**The entire project was built in conversation with [Claude](https://claude.ai).** I started with the regular Claude app to research the hardware and generate a detailed briefing document (included in this repo as `briefing.md`). Then I fed that briefing into [Claude Code](https://claude.ai/claude-code) which implemented everything - from hardware config to the final UI. Pure ESPHome YAML, no C++ needed.
 
 ## Overview
 
