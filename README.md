@@ -4,6 +4,16 @@ An iPod-inspired audiobook controller for children using ESPHome and LVGL on a t
 
 ![NanoPod](images/nanopod.jpg)
 
+## Why I Built This
+
+*Built from the silence room in a spa, between Christmas and New Year's 2024.*
+
+While my wife was reading, I was playing with Claude on my phone (forgot my book). The problem: our kid wakes up very early, and you don't want to give her a real screen. But a speaker and "something fenced" to control it? That could work.
+
+There are tons of commercial options for kids' audio players, but they all come with subscriptions and limited content libraries. Since we're already on Spotify with all her audiobooks, I had the idea to create this little device. No soldering required - just flash and go.
+
+**The entire project was built in conversation with [Claude](https://claude.ai)** - from hardware research to the final YAML config. Pure ESPHome, no C++ needed.
+
 ## Overview
 
 NanoPod is a simple, child-friendly audiobook controller that connects to [Music Assistant](https://music-assistant.io/). Turn the wheel to browse, click to play - just like an iPod. No phone needed, no complicated apps.
@@ -147,6 +157,7 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
+- **[Claude](https://claude.ai)** - AI pair programmer that built this entire project with me
 - [ESPHome](https://esphome.io/) - The foundation
 - [LVGL](https://lvgl.io/) - Graphics library
 - [Music Assistant](https://music-assistant.io/) - Media backend
