@@ -1,5 +1,10 @@
-# Gitignore settings for ESPHome
-/.esphome/
-/secrets.yaml
-__pycache__/
-*.pyc
+# macOS
+.DS_Store
+
+# ESPHome
+.esphome/
+secrets.yaml
+
+# Editor
+.vscode/
+.idea/
