@@ -14,7 +14,7 @@ pocket_depth = 18;    // mm - depth of pocket
 cable_hole = 6;       // mm - through-hole for cable
 
 /* [Finishing] */
-bevel_size = 1.5;     // mm - edge chamfer size
+bevel_size = 1;       // mm - edge chamfer size
 
 /* [Calculated] */
 back_height = front_height + depth * tan(angle);
@@ -32,22 +32,77 @@ module wedge_body() {
     }
 }
 
-// Beveled wedge body
+// Chamfered wedge body (1mm edgy bevels on all long edges)
 module beveled_wedge() {
-    minkowski() {
-        // Slightly smaller body
-        translate([bevel_size, bevel_size, bevel_size])
-        scale([(width - 2*bevel_size)/width,
-               (depth - 2*bevel_size)/depth,
-               1])
-        difference() {
-            wedge_body();
-            // Remove top to prevent double bevel
-            translate([-1, -1, back_height])
-                cube([width + 2, depth + 2, bevel_size * 2]);
-        }
-        // Bevel sphere
-        sphere(r = bevel_size, $fn = 16);
+    c = bevel_size;
+
+    difference() {
+        wedge_body();
+
+        // === BOTTOM EDGES ===
+        // Bottom front edge
+        translate([0, 0, 0])
+        rotate([45, 0, 0])
+        translate([-1, -c, -c])
+        cube([width + 2, c * 2, c * 2]);
+
+        // Bottom back edge
+        translate([0, depth, 0])
+        rotate([45, 0, 0])
+        translate([-1, -c, -c])
+        cube([width + 2, c * 2, c * 2]);
+
+        // Bottom left edge
+        translate([0, 0, 0])
+        rotate([0, -45, 0])
+        translate([-c, -1, -c])
+        cube([c * 2, depth + 2, c * 2]);
+
+        // Bottom right edge
+        translate([width, 0, 0])
+        rotate([0, -45, 0])
+        translate([-c, -1, -c])
+        cube([c * 2, depth + 2, c * 2]);
+
+        // === VERTICAL CORNER EDGES ===
+        // Front left vertical
+        translate([0, 0, 0])
+        rotate([0, 0, 45])
+        translate([-c * 0.7, -c * 0.7, -1])
+        cube([c * 1.4, c * 1.4, front_height + 2]);
+
+        // Front right vertical
+        translate([width, 0, 0])
+        rotate([0, 0, 45])
+        translate([-c * 0.7, -c * 0.7, -1])
+        cube([c * 1.4, c * 1.4, front_height + 2]);
+
+        // Back left vertical
+        translate([0, depth, 0])
+        rotate([0, 0, 45])
+        translate([-c * 0.7, -c * 0.7, -1])
+        cube([c * 1.4, c * 1.4, back_height + 2]);
+
+        // Back right vertical
+        translate([width, depth, 0])
+        rotate([0, 0, 45])
+        translate([-c * 0.7, -c * 0.7, -1])
+        cube([c * 1.4, c * 1.4, back_height + 2]);
+
+        // === TOP EDGES (along angled surface) ===
+        // Top left edge (along slope)
+        translate([0, 0, front_height])
+        rotate([angle, 0, 0])
+        rotate([0, -45, 0])
+        translate([-c * 0.7, -1, -c * 0.7])
+        cube([c * 1.4, depth / cos(angle) + 2, c * 1.4]);
+
+        // Top right edge (along slope)
+        translate([width, 0, front_height])
+        rotate([angle, 0, 0])
+        rotate([0, -45, 0])
+        translate([-c * 0.7, -1, -c * 0.7])
+        cube([c * 1.4, depth / cos(angle) + 2, c * 1.4]);
     }
 }
 
@@ -83,12 +138,18 @@ module stand() {
     surface_z = front_height + (depth/2) * tan(angle);
 
     difference() {
-        wedge_body();
+        beveled_wedge();  // Slightly rounded edges
         // 55mm pocket, 18mm deep, perpendicular to 15° surface
         translate([width/2, depth/2, surface_z])
         rotate([angle, 0, 0])  // Perpendicular to angled top surface
         translate([0, 0, -pocket_depth])
         cylinder(h = pocket_depth + 1, d = pocket_diameter, $fn = 64);
+
+        // Bevel on top edge of pocket (1mm chamfer)
+        translate([width/2, depth/2, surface_z])
+        rotate([angle, 0, 0])
+        translate([0, 0, -bevel_size])
+        cylinder(h = bevel_size + 1, d1 = pocket_diameter, d2 = pocket_diameter + bevel_size * 2, $fn = 64);
     }
 }
 
