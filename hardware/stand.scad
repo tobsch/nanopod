@@ -3,7 +3,7 @@
 // Material: Oak wood
 
 /* [Main Dimensions] */
-width = 120;          // mm - total width
+width = 80;           // mm - total width
 depth = 80;           // mm - total depth
 front_height = 15;    // mm - height at front edge
 angle = 15;           // degrees - viewing angle
@@ -85,15 +85,10 @@ module stand() {
     difference() {
         wedge_body();
         // 55mm pocket, 18mm deep, perpendicular to 15° surface
-        translate([60, 40, surface_z])
+        translate([width/2, depth/2, surface_z])
         rotate([angle, 0, 0])  // Perpendicular to angled top surface
         translate([0, 0, -pocket_depth])
         cylinder(h = pocket_depth + 1, d = pocket_diameter, $fn = 64);
-
-        // 6mm cable hole to back
-        translate([60, 40, surface_z])
-        rotate([-90, 0, 0])
-        cylinder(h = depth, d = cable_hole, $fn = 32);
     }
 }
 
