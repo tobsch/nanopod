@@ -143,6 +143,7 @@ touchscreen:
     reset_pin: GPIO13
     on_touch:
       - lambda: |-
+          id(touch_active) = true;
           id(touch_start_x) = touch.x;
           id(touch_start_y) = touch.y;
           id(touch_end_x) = touch.x;
@@ -158,6 +159,9 @@ touchscreen:
           }
     on_release:
       - script.execute: handle_touch_gesture
+      - lambda: |-
+          id(touch_active) = false;
+          id(last_nav_ms) = millis();  // Block button presses after touch
 
 # Power rails - CRITICAL for CrowPanel!
 output:
@@ -262,6 +266,27 @@ globals:
   - id: album_count
     type: int
     initial_value: "0"
+  # Navigation debounce to prevent double-tap issues
+  - id: last_nav_ms
+    type: uint32_t
+    initial_value: "0"
+  # Track when touch is active to ignore spurious button presses
+  - id: touch_active
+    type: bool
+    initial_value: "false"
+  # Pagination state for lazy loading
+  - id: total_album_count
+    type: int
+    initial_value: "0"
+  - id: loaded_album_count
+    type: int
+    initial_value: "0"
+  - id: loading_in_progress
+    type: bool
+    initial_value: "false"
+  - id: initial_load_complete
+    type: bool
+    initial_value: "false"
   # Artist data (max 10 artists)
   - id: artist_names
     type: std::vector<std::string>
@@ -333,6 +358,26 @@ interval:
           then:
             - logger.log: "Idle timeout - entering sleep mode"
             - script.execute: enter_sleep_mode
+
+  # Background album loading - fetch next page every 2 seconds when idle
+  - interval: 2s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              // Only load if:
+              // 1. Initial load complete
+              // 2. Not currently loading
+              // 3. More albums to load
+              // 4. Not sleeping
+              // 5. User idle for 500ms (not actively scrolling)
+              return id(initial_load_complete) &&
+                     !id(loading_in_progress) &&
+                     id(loaded_album_count) < id(total_album_count) &&
+                     !id(display_sleeping) &&
+                     (millis() - id(last_activity_ms) > 500);
+          then:
+            - script.execute: fetch_album_page
 
 # Rotary Encoder
 sensor:
@@ -478,6 +523,11 @@ binary_sensor:
                 lambda: 'return !id(display_sleeping);'
               then:
                 - lambda: |-
+                    // Ignore button if touch is active or just ended (touch triggers button!)
+                    if (id(touch_active) || (millis() - id(last_nav_ms) < 500)) {
+                      ESP_LOGD("nav", "Ignoring click - touch active or recent");
+                      return;
+                    }
                     int screen = id(current_screen);
                     // Track previous screen for transition detection
                     id(screen_before_gesture) = screen;
@@ -485,11 +535,13 @@ binary_sensor:
                       // HOME: Click opens albums for artist
                       id(current_screen) = 1;
                       id(selected_album) = 0;
+                      id(last_nav_ms) = millis();
                       ESP_LOGI("nav", "HOME -> ALBUMS");
                     } else if (screen == 1) {
                       // ALBUMS: Click plays album
                       id(current_screen) = 2;
                       id(is_playing) = true;
+                      id(last_nav_ms) = millis();
                       ESP_LOGI("nav", "ALBUMS -> PLAYING");
                     } else if (screen == 2) {
                       // PLAYING: Click toggles play/pause
@@ -631,15 +683,22 @@ script:
                 if (is_tap) {
                   // Tap = forward action (select / play-pause)
                   ESP_LOGI("touch", "TAP detected");
-                  id(gesture_type) = 1;  // SELECT
-                  if (screen == 0) {
-                    id(current_screen) = 1;
-                    id(selected_album) = 0;
-                  } else if (screen == 1) {
-                    id(current_screen) = 2;
-                    id(is_playing) = true;
-                  } else if (screen == 2) {
-                    id(is_playing) = !id(is_playing);
+                  // Debounce: ignore if navigated recently (prevents double-tap skipping screens)
+                  if (millis() - id(last_nav_ms) < 400) {
+                    ESP_LOGD("touch", "Ignoring tap - debounce");
+                  } else {
+                    id(gesture_type) = 1;  // SELECT
+                    if (screen == 0) {
+                      id(current_screen) = 1;
+                      id(selected_album) = 0;
+                      id(last_nav_ms) = millis();
+                    } else if (screen == 1) {
+                      id(current_screen) = 2;
+                      id(is_playing) = true;
+                      id(last_nav_ms) = millis();
+                    } else if (screen == 2) {
+                      id(is_playing) = !id(is_playing);
+                    }
                   }
                 } else if (is_swipe) {
                   if (is_horizontal) {
@@ -695,15 +754,22 @@ script:
                     } else {
                       // SWIPE DOWN = select (same as tap)
                       ESP_LOGI("touch", "SWIPE DOWN (select)");
-                      id(gesture_type) = 1;  // SELECT
-                      if (screen == 0) {
-                        id(current_screen) = 1;
-                        id(selected_album) = 0;
-                      } else if (screen == 1) {
-                        id(current_screen) = 2;
-                        id(is_playing) = true;
-                      } else if (screen == 2) {
-                        id(is_playing) = !id(is_playing);
+                      // Debounce: ignore if navigated recently (prevents double-tap skipping screens)
+                      if (millis() - id(last_nav_ms) < 400) {
+                        ESP_LOGD("touch", "Ignoring swipe down - debounce");
+                      } else {
+                        id(gesture_type) = 1;  // SELECT
+                        if (screen == 0) {
+                          id(current_screen) = 1;
+                          id(selected_album) = 0;
+                          id(last_nav_ms) = millis();
+                        } else if (screen == 1) {
+                          id(current_screen) = 2;
+                          id(is_playing) = true;
+                          id(last_nav_ms) = millis();
+                        } else if (screen == 2) {
+                          id(is_playing) = !id(is_playing);
+                        }
                       }
                     }
                   }
@@ -774,10 +840,10 @@ script:
                   - script.execute: ma_stop
                   - script.execute: led_idle
 
-  # Fetch albums and extract unique artists (so we only show artists with albums)
+  # Fetch first page of albums and extract artists (lazy loading initial page)
   - id: fetch_artists
     then:
-      - logger.log: "Starting fetch_artists (from albums)..."
+      - logger.log: "Starting fetch_artists (first page)..."
       - lambda: |-
           id(artist_names).clear();
           id(artist_ids).clear();
@@ -786,7 +852,13 @@ script:
           id(album_uris).clear();
           id(album_artist_ids).clear();
           id(album_images).clear();
-          ESP_LOGI("ma", "Fetching all albums to extract artists...");
+          id(artist_images).clear();
+          id(loaded_album_count) = 0;
+          id(total_album_count) = 0;
+          id(initial_load_complete) = false;
+          id(loading_in_progress) = true;
+          ESP_LOGI("ma", "Fetching first page of albums...");
+      - script.execute: led_loading
       - http_request.post:
           url: "http://${ma_host}:${ma_port}/api"
           capture_response: true
@@ -794,7 +866,7 @@ script:
           request_headers:
             Content-Type: "application/json"
             Authorization: "Bearer ${ma_token}"
-          body: '{"command":"music/albums/library_items","args":{"limit":100}}'
+          body: '{"command":"music/albums/library_items","args":{"limit":25,"offset":0}}'
           on_response:
             then:
               - lambda: |-
@@ -815,9 +887,11 @@ script:
 
                     if (error) {
                       ESP_LOGE("ma", "JSON parse error: %s", error.c_str());
+                      id(loading_in_progress) = false;
                     } else if (doc.is<JsonArray>()) {
                       JsonArray arr = doc.as<JsonArray>();
-                      ESP_LOGI("ma", "Parsed %d albums", arr.size());
+                      int page_count = arr.size();
+                      ESP_LOGI("ma", "Parsed %d albums (first page)", page_count);
 
                       // Store all albums with their artist IDs
                       for (JsonObject album : arr) {
@@ -842,9 +916,10 @@ script:
                               break;
                             }
                           }
-                          if (!found && id(artist_names).size() < 20) {
+                          if (!found && id(artist_names).size() < 100) {
                             id(artist_names).push_back(std::string(artist_name));
                             id(artist_ids).push_back(album_artist_id);
+                            id(artist_images).push_back("");  // Placeholder, will fill below
                             ESP_LOGD("ma", "Found artist: %s (id=%s)", artist_name, artist_id);
                           }
                         }
@@ -855,7 +930,7 @@ script:
                         id(album_uris).push_back(std::string(uri));
                         id(album_artist_ids).push_back(album_artist_id);
 
-                        // Extract cover art URL (try multiple possible paths)
+                        // Extract cover art URL
                         std::string image_url = "";
                         if (album.containsKey("image")) {
                           JsonObject img = album["image"];
@@ -875,39 +950,46 @@ script:
                             }
                           }
                         }
-                        // Convert Spotify URLs to use smaller 300x300 thumbnails
-                        // Replace "ab67616d0000b273" (640x640) with "ab67616d00004851" (300x300)
+                        // Convert Spotify URLs to smaller thumbnails
                         size_t pos = image_url.find("ab67616d0000b273");
                         if (pos != std::string::npos) {
                           image_url.replace(pos, 16, "ab67616d00004851");
                         }
                         id(album_images).push_back(image_url);
-                        if (!image_url.empty()) {
-                          ESP_LOGD("ma", "Album image: %s", image_url.c_str());
-                        }
                       }
-                      id(artist_count) = id(artist_names).size();
-                      id(album_count) = id(album_names).size();
 
-                      // Build artist_images: first album cover for each artist
-                      id(artist_images).clear();
+                      // Update artist images (first album cover for each)
                       for (int a = 0; a < id(artist_ids).size(); a++) {
-                        std::string artist_id = id(artist_ids)[a];
-                        std::string first_image = "";
-                        // Find first album with this artist_id that has an image
-                        for (int b = 0; b < id(album_artist_ids).size(); b++) {
-                          if (id(album_artist_ids)[b] == artist_id && !id(album_images)[b].empty()) {
-                            first_image = id(album_images)[b];
-                            break;
+                        if (id(artist_images)[a].empty()) {
+                          std::string aid = id(artist_ids)[a];
+                          for (int b = 0; b < id(album_artist_ids).size(); b++) {
+                            if (id(album_artist_ids)[b] == aid && !id(album_images)[b].empty()) {
+                              id(artist_images)[a] = id(album_images)[b];
+                              break;
+                            }
                           }
                         }
-                        id(artist_images).push_back(first_image);
                       }
 
-                      ESP_LOGI("ma", "Total: %d unique artists, %d albums", id(artist_count), id(album_count));
+                      id(artist_count) = id(artist_names).size();
+                      id(album_count) = id(album_names).size();
+                      id(loaded_album_count) = page_count;
+
+                      // If we got a full page, there might be more albums
+                      if (page_count >= 25) {
+                        id(total_album_count) = page_count + 25;  // Estimate more, will adjust as we load
+                        ESP_LOGI("ma", "First page full, more albums expected");
+                      } else {
+                        id(total_album_count) = page_count;  // This is all we have
+                      }
+
+                      id(initial_load_complete) = true;
+                      id(loading_in_progress) = false;
+                      ESP_LOGI("ma", "Initial load: %d artists, %d/%d albums", id(artist_count), id(loaded_album_count), id(total_album_count));
                     }
                   } else {
                     ESP_LOGE("ma", "HTTP error: %d", response->status_code);
+                    id(loading_in_progress) = false;
                   }
       - logger.log: "fetch_artists script complete"
       # Set cover for first artist
@@ -918,6 +1000,13 @@ script:
           }
       - script.execute: update_cover_art
       - script.execute: update_home_display
+      # Stop LED loading if no more pages needed
+      - if:
+          condition:
+            lambda: 'return id(loaded_album_count) >= id(total_album_count);'
+          then:
+            - script.stop: led_loading
+            - script.execute: led_idle
 
   # Filter albums for current artist (from already-loaded data)
   - id: fetch_albums
@@ -959,6 +1048,139 @@ script:
           }
       - script.execute: update_album_display
       - script.execute: update_cover_art
+
+  # Fetch next page of albums (background lazy loading)
+  - id: fetch_album_page
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(loading_in_progress) || !id(initial_load_complete);'
+          then:
+            - logger.log: "Skipping page load - already loading or not initialized"
+          else:
+            - lambda: |-
+                id(loading_in_progress) = true;
+                ESP_LOGI("ma", "Loading album page at offset %d...", id(loaded_album_count));
+            - script.execute: led_loading
+            - http_request.post:
+                url: "http://${ma_host}:${ma_port}/api"
+                capture_response: true
+                max_response_buffer_size: 65536
+                request_headers:
+                  Content-Type: "application/json"
+                  Authorization: "Bearer ${ma_token}"
+                body: !lambda |-
+                  return "{\"command\":\"music/albums/library_items\",\"args\":{\"limit\":25,\"offset\":" +
+                         std::to_string(id(loaded_album_count)) + "}}";
+                on_response:
+                  then:
+                    - lambda: |-
+                        ESP_LOGI("ma", "Page response: status=%d, len=%d", response->status_code, body.length());
+                        if (response->status_code == 200 && body.length() > 2) {
+                          JsonDocument doc;
+                          DeserializationError error = deserializeJson(doc, body);
+
+                          if (error) {
+                            std::string json_str = body;
+                            size_t last_complete = json_str.rfind("},{");
+                            if (last_complete != std::string::npos) {
+                              json_str = json_str.substr(0, last_complete + 1) + "]";
+                              error = deserializeJson(doc, json_str);
+                            }
+                          }
+
+                          if (error) {
+                            ESP_LOGE("ma", "JSON parse error: %s", error.c_str());
+                          } else if (doc.is<JsonArray>()) {
+                            JsonArray arr = doc.as<JsonArray>();
+                            int page_count = arr.size();
+                            ESP_LOGI("ma", "Parsed %d albums (page)", page_count);
+
+                            for (JsonObject album : arr) {
+                              const char* name = album["name"] | "Unknown";
+                              const char* item_id = album["item_id"] | "0";
+                              const char* uri = album["uri"] | "";
+
+                              JsonArray artists = album["artists"];
+                              std::string album_artist_id = "0";
+                              if (artists.size() > 0) {
+                                JsonObject artist = artists[0];
+                                const char* artist_name = artist["name"] | "Unknown";
+                                const char* artist_id = artist["item_id"] | "0";
+                                album_artist_id = std::string(artist_id);
+
+                                // Check for new artist
+                                bool found = false;
+                                for (const auto& existing_id : id(artist_ids)) {
+                                  if (existing_id == album_artist_id) {
+                                    found = true;
+                                    break;
+                                  }
+                                }
+                                if (!found && id(artist_names).size() < 100) {
+                                  id(artist_names).push_back(std::string(artist_name));
+                                  id(artist_ids).push_back(album_artist_id);
+                                  id(artist_images).push_back("");
+                                  ESP_LOGD("ma", "New artist: %s", artist_name);
+                                }
+                              }
+
+                              id(album_names).push_back(std::string(name));
+                              id(album_ids).push_back(std::string(item_id));
+                              id(album_uris).push_back(std::string(uri));
+                              id(album_artist_ids).push_back(album_artist_id);
+
+                              std::string image_url = "";
+                              if (album.containsKey("image")) {
+                                JsonObject img = album["image"];
+                                const char* path = img["path"] | "";
+                                if (strlen(path) > 0) image_url = std::string(path);
+                              }
+                              size_t pos = image_url.find("ab67616d0000b273");
+                              if (pos != std::string::npos) {
+                                image_url.replace(pos, 16, "ab67616d00004851");
+                              }
+                              id(album_images).push_back(image_url);
+                            }
+
+                            // Update artist images for any new artists
+                            for (int a = 0; a < id(artist_ids).size(); a++) {
+                              if (id(artist_images)[a].empty()) {
+                                std::string aid = id(artist_ids)[a];
+                                for (int b = 0; b < id(album_artist_ids).size(); b++) {
+                                  if (id(album_artist_ids)[b] == aid && !id(album_images)[b].empty()) {
+                                    id(artist_images)[a] = id(album_images)[b];
+                                    break;
+                                  }
+                                }
+                              }
+                            }
+
+                            id(artist_count) = id(artist_names).size();
+                            id(loaded_album_count) += page_count;
+
+                            // Update total estimate
+                            if (page_count >= 25) {
+                              id(total_album_count) = id(loaded_album_count) + 25;
+                            } else {
+                              id(total_album_count) = id(loaded_album_count);
+                              ESP_LOGI("ma", "All albums loaded!");
+                            }
+
+                            ESP_LOGI("ma", "Progress: %d artists, %d/%d albums",
+                                     id(artist_count), id(loaded_album_count), id(total_album_count));
+                          }
+                        }
+                        id(loading_in_progress) = false;
+            - script.execute: update_home_display
+            # Stop LED if all loaded
+            - if:
+                condition:
+                  lambda: 'return id(loaded_album_count) >= id(total_album_count);'
+                then:
+                  - script.stop: led_loading
+                  - script.execute: led_idle
 
   # Update cover art image
   - id: update_cover_art
@@ -1276,6 +1498,34 @@ script:
       - delay: 2s
       # Hide volume indicator
       - lvgl.widget.hide: volume_container
+      - light.turn_off:
+          id: rgb_leds
+          transition_length: 500ms
+
+  # LED Feedback: Loading - slow blue pulse while background loading
+  - id: led_loading
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(loading_in_progress) || (id(loaded_album_count) < id(total_album_count));'
+          then:
+            - light.turn_on:
+                id: rgb_leds
+                brightness: 20%
+                red: 10%
+                green: 30%
+                blue: 100%
+                transition_length: 800ms
+            - delay: 1s
+            - light.turn_on:
+                id: rgb_leds
+                brightness: 5%
+                red: 0%
+                green: 10%
+                blue: 40%
+                transition_length: 800ms
+            - delay: 1s
       - light.turn_off:
           id: rgb_leds
           transition_length: 500ms
