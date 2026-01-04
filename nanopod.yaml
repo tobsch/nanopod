@@ -370,12 +370,14 @@ interval:
               // 2. Not currently loading
               // 3. More albums to load
               // 4. Not sleeping
-              // 5. User idle for 500ms (not actively scrolling)
+              // 5. On home screen only (don't load while browsing albums/playing)
+              // 6. User idle for 1s
               return id(initial_load_complete) &&
                      !id(loading_in_progress) &&
                      id(loaded_album_count) < id(total_album_count) &&
                      !id(display_sleeping) &&
-                     (millis() - id(last_activity_ms) > 500);
+                     id(current_screen) == 0 &&
+                     (millis() - id(last_activity_ms) > 1000);
           then:
             - script.execute: fetch_album_page
 
@@ -1173,7 +1175,12 @@ script:
                           }
                         }
                         id(loading_in_progress) = false;
-            - script.execute: update_home_display
+            # Only update home display if on home screen
+            - if:
+                condition:
+                  lambda: 'return id(current_screen) == 0;'
+                then:
+                  - script.execute: update_home_display
             # Stop LED if all loaded
             - if:
                 condition:
