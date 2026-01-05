@@ -42,7 +42,7 @@ NanoPod is a simple, child-friendly audiobook controller that connects to [Music
 | Touch | CST816S capacitive touchscreen |
 | LEDs | 5x WS2812 RGB (optional) |
 
-**Where to buy:** [Elecrow](https://www.elecrow.com/crowpanel-1-28inch-hmi-esp32-rotary-display-240-240-ips-round-touch-knob-screen.html) | [AliExpress](https://www.aliexpress.com/item/1005009773720893.html)
+**Where to buy:** [Elecrow](https://www.elecrow.com/crowpanel-1-28inch-hmi-esp32-rotary-display-240-240-ips-round-touch-knob-screen.html) | [AliExpress](https://www.aliexpress.com/item/1005009773720893.html) | [BerryBase](https://www.berrybase.de/en/elecrow-crowpanel-1-28-zoll-smart-knob-ips-touchscreen-esp32-hmi-drehgeber-home-assistant-5v)
 
 ## Requirements
 
