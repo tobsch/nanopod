@@ -1,6 +1,7 @@
 # NanoPod
 
 An iPod-inspired audiobook controller for children using ESPHome and LVGL on a tiny round display.
+* Think:* Toniebox without expensive characters, Tigerbox without subscription
 
 ![NanoPod](images/nanopod.jpg)
 
