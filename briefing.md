@@ -41,7 +41,7 @@ ESPHome's native LVGL integration is powerful enough for complex UIs without any
 | LEDs | 5x WS2812B RGB |
 
 **Links:**
-- [Product Page](https://www.elecrow.com/crowpanel-1-28-inch-hmi-esp32-rotary-display.html)
+- [Product Page](https://www.elecrow.com/crowpanel-1-28inch-hmi-esp32-rotary-display-240-240-ips-round-touch-knob-screen.html)
 - [Wiki](https://www.elecrow.com/wiki/CrowPanel_1.28inch-HMI_ESP32_Rotary_Display.html)
 
 ### Pin Mapping
