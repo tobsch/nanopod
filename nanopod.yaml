@@ -104,9 +104,10 @@ http_request:
 # Online image for cover art
 online_image:
   - id: cover_art
-    url: "https://via.placeholder.com/120.jpg"  # Placeholder, updated dynamically
+    # Harmless local placeholder (fails fast); real covers are set dynamically.
+    url: "http://${ma_host}:${ma_port}/imageproxy?path=&size=256"
     format: JPEG
-    resize: 100x100
+    resize: 70x70
     type: RGB565
     on_download_finished:
       then:
@@ -881,10 +882,16 @@ script:
                             }
                           }
                         }
-                        // Convert Spotify URLs to smaller thumbnails
-                        size_t pos = image_url.find("ab67616d0000b273");
-                        if (pos != std::string::npos) {
-                          image_url.replace(pos, 16, "ab67616d00004851");
+                        // Serve covers through MA's local image proxy (plain HTTP,
+                        // no TLS) instead of the Spotify CDN — the ESP TLS handshake
+                        // was ~1s and blocked the LVGL loop. For Spotify art, request
+                        // the 64px thumbnail at original size (size=0): ~4KB, a fast
+                        // decode. Other providers are capped at 256px. MA caches.
+                        if (!image_url.empty()) {
+                          std::string sz = "256";
+                          size_t sp = image_url.find("ab67616d0000b273");
+                          if (sp != std::string::npos) { image_url.replace(sp, 16, "ab67616d00004851"); sz = "0"; }
+                          image_url = "http://${ma_host}:${ma_port}/imageproxy?path=" + image_url + "&size=" + sz;
                         }
                         id(album_images).push_back(image_url);
                       }
@@ -1068,9 +1075,25 @@ script:
                                 const char* path = img["path"] | "";
                                 if (strlen(path) > 0) image_url = std::string(path);
                               }
-                              size_t pos = image_url.find("ab67616d0000b273");
-                              if (pos != std::string::npos) {
-                                image_url.replace(pos, 16, "ab67616d00004851");
+                              // Covers live in metadata.images, not album.image —
+                              // without this fallback, background-loaded pages had
+                              // no cover art at all.
+                              if (image_url.empty() && album.containsKey("metadata")) {
+                                JsonObject meta = album["metadata"];
+                                if (meta.containsKey("images")) {
+                                  JsonArray images = meta["images"];
+                                  if (images.size() > 0) {
+                                    const char* path = images[0]["path"] | "";
+                                    image_url = std::string(path);
+                                  }
+                                }
+                              }
+                              // Route through MA's local image proxy (see fetch_artists).
+                              if (!image_url.empty()) {
+                                std::string sz = "256";
+                                size_t sp = image_url.find("ab67616d0000b273");
+                                if (sp != std::string::npos) { image_url.replace(sp, 16, "ab67616d00004851"); sz = "0"; }
+                                image_url = "http://${ma_host}:${ma_port}/imageproxy?path=" + image_url + "&size=" + sz;
                               }
                               id(album_images).push_back(image_url);
                             }
