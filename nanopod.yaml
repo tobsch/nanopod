@@ -44,9 +44,16 @@ psram:
   speed: 80MHz
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+    - ssid: !secret hotspot_ssid
+      password: !secret hotspot_password
   fast_connect: true
+  # Mains/USB-powered device: keep WiFi fully awake so OTA and HA control stay
+  # reliable and the controller responds instantly. (Old code escalated to
+  # POWER_SAVE_HIGH on display sleep, which dropped it off the network.)
+  power_save_mode: none
 
   ap:
     ssid: "NanoPod-AP"
@@ -63,7 +70,7 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: DEBUG
+  level: INFO
 
 # ============================================
 # Music Assistant Configuration
@@ -89,7 +96,9 @@ text:
 
 http_request:
   useragent: esphome/nanopod
-  timeout: 10s
+  # Keep below the ~5s task watchdog: an unreachable MA must fail gracefully,
+  # never block the LVGL loop long enough to trigger a watchdog reboot.
+  timeout: 4s
   verify_ssl: false
 
 # Online image for cover art
@@ -309,6 +318,9 @@ globals:
   # Current cover art URL for display
   - id: current_cover_url
     type: std::string
+  # Last downloaded cover URL (to avoid re-downloading)
+  - id: last_downloaded_url
+    type: std::string
   # Filtered albums for current artist
   - id: filtered_album_names
     type: std::vector<std::string>
@@ -431,7 +443,7 @@ sensor:
                 condition:
                   lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
                 then:
-                  - script.execute: update_cover_art
+                  - script.execute: update_cover_art_debounced
             - if:
                 condition:
                   lambda: 'return id(current_screen) == 2;'
@@ -482,7 +494,7 @@ sensor:
                 condition:
                   lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
                 then:
-                  - script.execute: update_cover_art
+                  - script.execute: update_cover_art_debounced
             - if:
                 condition:
                   lambda: 'return id(current_screen) == 2;'
@@ -615,22 +627,14 @@ script:
           id: backlight
           transition_length: 2s
       - delay: 2.5s
-      # Turn off display power to save energy
+      # Turn off display power to save energy (WiFi stays fully awake for OTA/HA)
       - switch.turn_off: lcd_power_switch
-      # Enable WiFi modem sleep for power savings
-      - lambda: |-
-          wifi::global_wifi_component->set_power_save_mode(wifi::WIFI_POWER_SAVE_HIGH);
-          ESP_LOGI("sleep", "WiFi modem sleep enabled");
-      - logger.log: "Display sleeping, WiFi in power save"
+      - logger.log: "Display sleeping"
 
   # Wake from sleep - restore display and reload catalog
   - id: wake_from_sleep
     then:
       - logger.log: "Waking from sleep..."
-      # Disable WiFi power save for full performance
-      - lambda: |-
-          wifi::global_wifi_component->set_power_save_mode(wifi::WIFI_POWER_SAVE_NONE);
-          ESP_LOGI("sleep", "WiFi power save disabled");
       # Turn on display power
       - switch.turn_on: lcd_power_switch
       - delay: 100ms
@@ -668,19 +672,17 @@ script:
                 uint32_t duration = millis() - id(touch_start_ms);
 
                 // Thresholds
-                const int SWIPE_THRESHOLD = 30;  // pixels minimum for swipe
-                const int TAP_MAX_MOVE = 20;     // max movement for tap
-                const uint32_t TAP_MAX_TIME = 300; // max ms for tap
+                const int TAP_MAX_MOVE = 60;     // max movement for tap (very forgiving)
+                const uint32_t TAP_MAX_TIME = 500; // max ms for tap
 
+                // Tap-only mode (use rotary dial for navigation)
                 bool is_tap = (abs(dx) < TAP_MAX_MOVE && abs(dy) < TAP_MAX_MOVE && duration < TAP_MAX_TIME);
-                bool is_horizontal = abs(dx) > abs(dy);
-                bool is_swipe = (is_horizontal ? abs(dx) : abs(dy)) > SWIPE_THRESHOLD;
 
                 int screen = id(current_screen);
                 id(screen_before_gesture) = screen;
                 id(gesture_type) = 0;  // Reset
 
-                ESP_LOGI("touch", "Gesture: dx=%d dy=%d dur=%dms tap=%d swipe=%d", dx, dy, duration, is_tap, is_swipe);
+                ESP_LOGI("touch", "Touch: dx=%d dy=%d dur=%dms tap=%d", dx, dy, duration, is_tap);
 
                 if (is_tap) {
                   // Tap = forward action (select / play-pause)
@@ -700,79 +702,6 @@ script:
                       id(last_nav_ms) = millis();
                     } else if (screen == 2) {
                       id(is_playing) = !id(is_playing);
-                    }
-                  }
-                } else if (is_swipe) {
-                  if (is_horizontal) {
-                    if (dx > 0) {
-                      // SWIPE RIGHT = next
-                      ESP_LOGI("touch", "SWIPE RIGHT");
-                      id(gesture_type) = 2;  // NEXT
-                      if (screen == 0 && id(artist_count) > 0) {
-                        id(selected_artist) = (id(selected_artist) + 1) % id(artist_count);
-                        if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
-                          id(current_cover_url) = id(artist_images)[id(selected_artist)];
-                        }
-                      } else if (screen == 1 && id(album_count) > 0) {
-                        id(selected_album) = (id(selected_album) + 1) % id(album_count);
-                        if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
-                          id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
-                        }
-                      } else if (screen == 2) {
-                        id(gesture_type) = 5;  // VOLUME_CHANGE
-                        id(current_volume) = std::min(id(current_volume) + 5, 100);
-                      }
-                    } else {
-                      // SWIPE LEFT = previous
-                      ESP_LOGI("touch", "SWIPE LEFT");
-                      id(gesture_type) = 3;  // PREV
-                      if (screen == 0 && id(artist_count) > 0) {
-                        id(selected_artist) = (id(selected_artist) + id(artist_count) - 1) % id(artist_count);
-                        if (id(selected_artist) < id(artist_images).size() && !id(artist_images)[id(selected_artist)].empty()) {
-                          id(current_cover_url) = id(artist_images)[id(selected_artist)];
-                        }
-                      } else if (screen == 1 && id(album_count) > 0) {
-                        id(selected_album) = (id(selected_album) + id(album_count) - 1) % id(album_count);
-                        if (id(selected_album) < id(filtered_album_images).size() && !id(filtered_album_images)[id(selected_album)].empty()) {
-                          id(current_cover_url) = id(filtered_album_images)[id(selected_album)];
-                        }
-                      } else if (screen == 2) {
-                        id(gesture_type) = 5;  // VOLUME_CHANGE
-                        id(current_volume) = std::max(id(current_volume) - 5, 0);
-                      }
-                    }
-                  } else {
-                    // Vertical swipe
-                    if (dy < 0) {
-                      // SWIPE UP = back
-                      ESP_LOGI("touch", "SWIPE UP (back)");
-                      id(gesture_type) = 4;  // BACK
-                      if (screen == 1) {
-                        id(current_screen) = 0;
-                      } else if (screen == 2) {
-                        id(is_playing) = false;
-                        id(current_screen) = 1;
-                      }
-                    } else {
-                      // SWIPE DOWN = select (same as tap)
-                      ESP_LOGI("touch", "SWIPE DOWN (select)");
-                      // Debounce: ignore if navigated recently (prevents double-tap skipping screens)
-                      if (millis() - id(last_nav_ms) < 400) {
-                        ESP_LOGD("touch", "Ignoring swipe down - debounce");
-                      } else {
-                        id(gesture_type) = 1;  // SELECT
-                        if (screen == 0) {
-                          id(current_screen) = 1;
-                          id(selected_album) = 0;
-                          id(last_nav_ms) = millis();
-                        } else if (screen == 1) {
-                          id(current_screen) = 2;
-                          id(is_playing) = true;
-                          id(last_nav_ms) = millis();
-                        } else if (screen == 2) {
-                          id(is_playing) = !id(is_playing);
-                        }
-                      }
                     }
                   }
                 }
@@ -803,7 +732,7 @@ script:
                 condition:
                   lambda: 'return id(current_screen) == 0 || id(current_screen) == 1;'
                 then:
-                  - script.execute: update_cover_art
+                  - script.execute: update_cover_art_debounced
                   - script.execute: led_show_position
             # Handle PLAYER screen actions
             - if:
@@ -1189,13 +1118,26 @@ script:
                   - script.stop: led_loading
                   - script.execute: led_idle
 
-  # Update cover art image
+  # Debounced cover-art loader: restart-mode script waits until the user stops
+  # scrolling before triggering the (blocking) download+JPEG-decode. Spinning the
+  # dial past many artists no longer queues a download per step — only the final
+  # selection's cover is fetched. This is the main fix for scroll-time UI freezes.
+  - id: update_cover_art_debounced
+    mode: restart
+    then:
+      - delay: 350ms
+      - script.execute: update_cover_art
+
+  # Update cover art image (only if URL changed)
   - id: update_cover_art
     then:
       - if:
           condition:
-            lambda: 'return !id(current_cover_url).empty();'
+            lambda: 'return !id(current_cover_url).empty() && id(current_cover_url) != id(last_downloaded_url);'
           then:
+            - lambda: |-
+                ESP_LOGI("cover", "New cover URL: %s", id(current_cover_url).c_str());
+                id(last_downloaded_url) = id(current_cover_url);
             - online_image.set_url:
                 id: cover_art
                 url: !lambda 'return id(current_cover_url);'
@@ -1569,7 +1511,7 @@ display:
       height: 240
     rotation: 0
     invert_colors: true
-    data_rate: 40MHz
+    data_rate: 80MHz
     auto_clear_enabled: false
 
 # LVGL Configuration
@@ -1616,10 +1558,8 @@ lvgl:
             bg_color: 0x646464
             border_color: 0x2D323C
             border_width: 2
-            shadow_color: 0x050A0F
-            shadow_width: 40
-            shadow_ofs_y: 15
             scrollbar_mode: "OFF"
+            scrollable: false
             widgets:
               # Inner content circle
               - obj:
@@ -1631,6 +1571,7 @@ lvgl:
                   border_color: 0x5A646E
                   border_width: 1
                   scrollbar_mode: "OFF"
+                  scrollable: false
                   widgets:
                     # Loading spinner
                     - spinner:
@@ -1711,10 +1652,8 @@ lvgl:
             bg_color: 0x646464
             border_color: 0x2D323C
             border_width: 2
-            shadow_color: 0x050A0F
-            shadow_width: 40
-            shadow_ofs_y: 15
             scrollbar_mode: "OFF"
+            scrollable: false
             widgets:
               # Inner content circle
               - obj:
@@ -1726,6 +1665,7 @@ lvgl:
                   border_color: 0x5A646E
                   border_width: 1
                   scrollbar_mode: "OFF"
+                  scrollable: false
                   widgets:
                     # Cover art
                     - image:
@@ -1793,10 +1733,8 @@ lvgl:
             bg_color: 0x646464
             border_color: 0x2D323C
             border_width: 2
-            shadow_color: 0x050A0F
-            shadow_width: 40
-            shadow_ofs_y: 15
             scrollbar_mode: "OFF"
+            scrollable: false
             widgets:
               # Inner content circle
               - obj:
@@ -1808,6 +1746,7 @@ lvgl:
                   border_color: 0x5A646E
                   border_width: 1
                   scrollbar_mode: "OFF"
+                  scrollable: false
                   widgets:
                     # Cover art
                     - image:
@@ -1829,6 +1768,7 @@ lvgl:
                         bg_opa: 50%
                         border_width: 0
                         scrollbar_mode: "OFF"
+                        scrollable: false
                         widgets:
                           - label:
                               id: play_icon
@@ -1860,6 +1800,7 @@ lvgl:
                         radius: 12
                         border_width: 0
                         scrollbar_mode: "OFF"
+                        scrollable: false
                         hidden: true
                         widgets:
                           # Speaker icon
@@ -1911,13 +1852,6 @@ font:
   - file: "gfonts://Montserrat"
     id: nanopod_font_24
     size: 24
-    bpp: 4
-    glyphsets:
-      - GF_Latin_Kernel
-      - GF_Latin_Core
-  - file: "gfonts://Montserrat"
-    id: nanopod_font_32
-    size: 32
     bpp: 4
     glyphsets:
       - GF_Latin_Kernel
