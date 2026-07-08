@@ -2,7 +2,7 @@ substitutions:
   ma_host: "192.168.0.157"
   ma_port: "8095"
   ma_token: "z4lw6YU4SocmbYnwcRBm5XTRzbBvT7BrvkZauBeC7ApGCrG0Y_aGzYYMtsr23fmY"
-  ma_player: "ma_room_kinderzimmer_linda"
+  ma_player: "uploxkinderzimmerlinda"
 
 esphome:
   name: nanopod
